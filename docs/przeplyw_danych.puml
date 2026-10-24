@@ -1,0 +1,54 @@
+@startuml
+autonumber
+
+actor "Pracownik (PWA)" as Pracownik
+participant "System Sklepu (API)" as SystemPaczek
+participant "Serwer" as Serwer
+participant "Baza Danych" as Baza
+participant "Bramki (ESP32-POE)" as Bramki
+participant "Lokalizator (XIAO)" as Lokalizator
+
+group Faza 1: Przyjęcie paczki w systemie
+    Pracownik -> Serwer: [REST] Skan kodu paczki i skan numeru lokalizatora
+    Serwer -> SystemPaczek: [API] Pobranie metadanych paczki
+    Serwer -> Baza: [PostgreSQL] Utworzenie powiązania (kod_paczki - id_lokalizatora)
+    Serwer --> Pracownik: [REST] Potwierdzenie przypisania
+end
+
+group Faza 2: Ciągła telemetria i Trylateracja (w tle)
+    loop Co ok. 1 sekundę
+        Lokalizator -> Bramki: [BLE] Sygnał rozgłoszeniowy + napięcie baterii (ADC)
+        Bramki -> Serwer: [MQTT] Przekazanie MAC lokalizatora, mocy RSSI oraz stanu baterii
+        Serwer -> Serwer: Obliczenia przestrzenne (Trylateracja z 3 bramek)
+        Serwer -> Baza: [Redis] Aktualizacja cache współrzędnych paczki
+        Serwer -> Baza: [PostgreSQL] Zapis historii baterii (alert jeśli bliska rozładowania)
+    end
+end
+
+group Faza 3: Wyszukiwanie paczki przez klienta
+    Pracownik -> Serwer: [REST] Przekazanie kodu odbioru klienta ("Znajdź paczkę")
+    Serwer -> Baza: Sprawdzenie id_lokalizatora przypisanego do paczki
+    Baza --> Serwer: Zwrócenie id_lokalizatora oraz wyliczonej strefy (z cache)
+    Serwer --> Pracownik: [REST] Wskazanie strefy / regału pracownikowi
+    Pracownik -> Serwer: [REST] Komenda aktywacji sygnałów (Gdy pracownik jest w strefie)
+    Serwer -> Bramki: [MQTT] Komenda: "Włącz sygnał świetlny i dźwiękowy dla ID X"
+    Bramki -> Lokalizator: [BLE] Komenda wykonawcza
+    Lokalizator -> Lokalizator: [Hardware] Wysterowanie kluczy (Q1, Q2) - Dioda miga, brzęczyk piszczy
+    Lokalizator --> Pracownik: [Fizyczne] Zauważenie paczki
+end
+
+group Faza 4: Wydanie paczki
+    Pracownik -> SystemPaczek: [REST/API] Próba wydania paczki klientowi
+    SystemPaczek -> Serwer: [API] Zapytanie o status lokalizatora
+    alt Lokalizator nie został odpięty
+        Serwer --> SystemPaczek: [API] Zwrócenie błędu
+        SystemPaczek --> Pracownik: [PWA/UI] ALARM: "Odepnij i zeskanuj lokalizator!"
+    else Lokalizator odpięty
+        Pracownik -> Serwer: [REST] Potwierdzenie zdjęcia lokalizatora
+        Serwer -> Baza: [PostgreSQL] Usunięcie powiązania (kod_paczki - id_lokalizatora)
+        Serwer --> SystemPaczek: [API] Zgoda na wydanie
+        SystemPaczek --> Pracownik: [PWA/UI] Paczka wydana poprawnie
+        Pracownik -> Lokalizator: [Fizyczne] Odłożenie na stację ładującą
+    end
+end
+@enduml
