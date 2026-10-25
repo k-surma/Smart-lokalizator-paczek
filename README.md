@@ -13,7 +13,7 @@ Rozwiązanie składa się z czterech głównych warstw komunikujących się w lo
 ## Struktura Repozytorium
 
 ```text
-lokalizator-paczek/
+Smart-lokalizator-paczek/
 ├── frontend/                 # Aplikacja PWA (React.js)
 │   ├── src/                  # Kod źródłowy aplikacji (komponenty, widoki)
 │   ├── public/               # Manifest PWA, ikony
