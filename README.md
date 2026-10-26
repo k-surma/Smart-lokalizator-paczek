@@ -5,7 +5,7 @@ System lokalizacji paczek w magazynie punktu odbioru, wykorzystujący technologi
 
 ## Architektura Systemu
 Rozwiązanie składa się z czterech głównych warstw komunikujących się w lokalnej sieci sklepu:
-1. **Aplikacja kliencka (Frontend):** PWA w React.js dla pracowników (skaner kodów, wyszukiwarka).
+1. **Aplikacja kliencka (Frontend):** Frontend oparty na Odoo
 2. **Serwer centralny (Backend):** Python (FastAPI) odpowiadający za API, logikę biznesową, obliczenia przestrzenne (NumPy) oraz integrację z systemem paczek w sklepie.
 3. **Bramki (Gateways):** Trzy urządzenia oparte na Seeed XIAO nRF52840 z bezprzewodową siecią Bluetooth LE.
 4. **Lokalizatory (Hardware):** Autorskie urządzenia oparte na Seeed XIAO nRF52840, zasilane akumulatorem LiPo, wyposażone w diodę LED o wysokiej jasności i pasywny brzęczyk piezo.
@@ -25,7 +25,7 @@ Smart-lokalizator-paczek/
 │   ├── requirements.txt      # Zależności backendowe (FastAPI, NumPy, Paho-MQTT, itp.)
 │   └── main.py               # Plik startowy serwera
 ├── firmware/                 # Oprogramowanie wbudowane (C++/Arduino)
-│   ├── gateway/              # Kod dla bramek Olimex ESP32-POE (MQTT <-> BLE)
+│   ├── gateway/              # Kod dla bramek
 │   └── locator/              # Kod dla modułów XIAO nRF52840 (BLE, obsługa GPIO, ADC)
 ├── hardware/                 # Projekty sprzętowe
 │   ├── 3d_models/            # Skrypty OpenSCAD i wygenerowane pliki STL (obudowy, klipsy)
