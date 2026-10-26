@@ -36,11 +36,11 @@ Smart-lokalizator-paczek/
 ```
 
 ## Stos Technologiczny
-- **Frontend:** React.js, PWA, HTML5-QRCode (obsługa skanera)
+- **Frontend:** Moduł Odoo wraz z odpowiednimi rozszerzeniami 
 - **Backend:** Python, FastAPI, NumPy (obliczenia przestrzenne)
 - **Bazy danych:** PostgreSQL (dane relacyjne, historia), Redis (cache danych telemetrycznych RSSI)
 - **Broker wiadomości:** Eclipse Mosquitto (MQTT)
-- **Urządzenia IoT:** Seeed XIAO nRF52840 (C++), Olimex ESP32-POE (C++)
+- **Urządzenia IoT:** Seeed XIAO nRF52840 (C++)
 - **Protokoły komunikacyjne:** REST API, MQTT, Bluetooth Low Energy (BLE 5)
 
 ## Architektura i Przepływ Danych
