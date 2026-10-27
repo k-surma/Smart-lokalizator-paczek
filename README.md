@@ -20,7 +20,7 @@ Smart-lokalizator-paczek/
 ├── backend/                  # Serwer API i logika trylateracji (Python/FastAPI)
 │   ├── api/                  # Endpointy REST (rutery)
 │   ├── core/                 # Algorytmy trylateracji, logika UART/PySerial
-│   ├── models/               # Modele danych i schematy bazy
+│   ├── models/               # Modele danych i skrypt inicjalizacyjny bazy (init.sql)
 │   ├── requirements.txt      # Zależności backendowe (FastAPI, NumPy, PySerial, itp.)
 │   └── main.py               # Plik startowy serwera
 ├── firmware/                 # Oprogramowanie wbudowane (C++/Arduino)
@@ -30,7 +30,7 @@ Smart-lokalizator-paczek/
 │   ├── 3d_models/            # Skrypty OpenSCAD i wygenerowane pliki STL (obudowy, klipsy)
 │   └── schematics/           # Schematy elektroniczne i diagramy podłączeń
 ├── docs/                     # Dokumentacja projektu (diagramy sekwencji, analiza wymagań)
-├── docker-compose.yml        # Konfiguracja środowiska (PostgreSQL, Redis, Backend)
+├── docker-compose.yml        # Konfiguracja środowiska (PostgreSQL, Redis, Odoo)
 └── README.md                 # Główny plik informacyjny
 ```
 
@@ -104,4 +104,50 @@ sequenceDiagram
     P-->>A: [BLE] Potwierdzenie / Rozłączenie
     Note over A: Wznawia skanowanie RSSI
     A-->>API: [USB / UART] Zwraca status "Sukces"
+```
+
+---
+
+## Schemat Bazy Danych (PostgreSQL)
+
+Baza danych `locator_db` przechowuje stałe punkty referencyjne bramek pomiarowych, aktualny stan zarejestrowanych lokalizatorów na paczkach oraz pełną historię obliczonych pozycji wraz z surowymi odczytami RSSI. Skrypt inicjalizujący strukturę oraz dane testowe znajduje się w pliku `backend/models/init.sql`.
+
+### Struktura Tabel:
+* **`gateways`** – przechowuje identyfikatory bramek (`A`, `B`, `C`), ich nazwy, stałe współrzędne montażowe w magazynie (`pos_x`, `pos_y` wyrażone w metrach) oraz flagę `is_aggregator` wskazującą jednostkę główną podpiętą po USB.
+* **`packages`** – główna tabela aktywnych przesyłek. Zawiera unikalny adres fizyczny `mac_address` modułu XIAO, kod kreskowy przesyłki z systemu Odoo (`package_code`), aktualny status operacyjny (`IDLE`, `LOCATING`, `FOUND`, `MISSING`), ostatnie wyliczone współrzędne (`last_x`, `last_y`) oraz poziom naładowania baterii (`battery_level`).
+* **`location_history`** – dziennik telemetryczny powiązany kluczem obcym z tabelą `packages`. Rejestruje historyczne położenie paczek w czasie wraz z surowymi wartościami sygnału (`rssi_a`, `rssi_b`, `rssi_c`), które posłużyły do wykonania trylateracji.
+
+```mermaid
+erDiagram
+    GATEWAYS {
+        varchar(10) id PK
+        varchar(50) name
+        float pos_x
+        float pos_y
+        boolean is_aggregator
+        timestamp last_heartbeat
+    }
+    PACKAGES {
+        serial id PK
+        varchar(17) mac_address UK
+        varchar(50) package_code UK
+        varchar(20) status
+        float last_x
+        float last_y
+        integer battery_level
+        timestamp last_seen
+        timestamp created_at
+    }
+    LOCATION_HISTORY {
+        serial id PK
+        integer package_id FK
+        float pos_x
+        float pos_y
+        integer rssi_a
+        integer rssi_b
+        integer rssi_c
+        timestamp recorded_at
+    }
+
+    PACKAGES ||--o{ LOCATION_HISTORY : "posiada historie pomiarow"
 ```
