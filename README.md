@@ -5,47 +5,45 @@ System lokalizacji paczek w magazynie punktu odbioru, wykorzystujący technologi
 
 ## Architektura Systemu
 Rozwiązanie składa się z czterech głównych warstw komunikujących się w lokalnej sieci sklepu:
-1. **Aplikacja kliencka (Frontend):** PWA w React.js dla pracowników (skaner kodów, wyszukiwarka).
-2. **Serwer centralny (Backend):** Python (FastAPI) odpowiadający za API, logikę biznesową, obliczenia przestrzenne (NumPy) oraz integrację z systemem paczek w sklepie.
-3. **Bramki (Gateways):** Trzy urządzenia oparte na Seeed XIAO nRF52840 z bezprzewodową siecią Bluetooth LE.
+1. **Aplikacja kliencka (Frontend):** Frontend oparty na niestandardowym module w systemie Odoo.
+2. **Serwer centralny (Backend):** Python (FastAPI) odpowiadający za API, logikę biznesową, komunikację sprzętową (PySerial) oraz obliczenia przestrzenne (NumPy).
+3. **Bramki (Gateways):** Trzy urządzenia oparte na Seeed XIAO nRF52840 pracujące w bezprzewodowej sieci Bluetooth LE.
 4. **Lokalizatory (Hardware):** Autorskie urządzenia oparte na Seeed XIAO nRF52840, zasilane akumulatorem LiPo, wyposażone w diodę LED o wysokiej jasności i pasywny brzęczyk piezo.
 
 ## Struktura Repozytorium
 
 ```text
 Smart-lokalizator-paczek/
-├── frontend/                 # Aplikacja PWA (React.js)
-│   ├── src/                  # Kod źródłowy aplikacji (komponenty, widoki)
-│   ├── public/               # Manifest PWA, ikony
-│   └── package.json          # Zależności frontendowe
+├── odoo_module/              # Aplikacja kliencka (Niestandardowy moduł Odoo)
+│   ├── views/                # Definicje widoków interfejsu (XML)
+│   └── controllers/          # Logika łącząca Odoo z API FastAPI (Python)
 ├── backend/                  # Serwer API i logika trylateracji (Python/FastAPI)
-│   ├── api/                  # Endpoinyt REST (rutery)
-│   ├── core/                 # Algorytmy trylateracji, logika MQTT
-│   ├── models/               # Modele danych i schematy bazy
-│   ├── requirements.txt      # Zależności backendowe (FastAPI, NumPy, Paho-MQTT, itp.)
+│   ├── api/                  # Endpointy REST (rutery)
+│   ├── core/                 # Algorytmy trylateracji, logika UART/PySerial
+│   ├── models/               # Modele danych i skrypt inicjalizacyjny bazy (init.sql)
+│   ├── requirements.txt      # Zależności backendowe (FastAPI, NumPy, PySerial, itp.)
 │   └── main.py               # Plik startowy serwera
 ├── firmware/                 # Oprogramowanie wbudowane (C++/Arduino)
-│   ├── gateway/              # Kod dla bramek Olimex ESP32-POE (MQTT <-> BLE)
-│   └── locator/              # Kod dla modułów XIAO nRF52840 (BLE, obsługa GPIO, ADC)
+│   ├── gateway/              # Kod dla bramek i agregatora XIAO nRF52840 (BLE Central, Serial)
+│   └── locator/              # Kod dla modułów XIAO na paczkach (BLE Peripheral, GPIO)
 ├── hardware/                 # Projekty sprzętowe
 │   ├── 3d_models/            # Skrypty OpenSCAD i wygenerowane pliki STL (obudowy, klipsy)
 │   └── schematics/           # Schematy elektroniczne i diagramy podłączeń
 ├── docs/                     # Dokumentacja projektu (diagramy sekwencji, analiza wymagań)
-├── docker-compose.yml        # Konfiguracja środowiska (PostgreSQL, Redis, Eclipse Mosquitto, Backend)
+├── docker-compose.yml        # Konfiguracja środowiska (PostgreSQL, Redis, Odoo)
 └── README.md                 # Główny plik informacyjny
 ```
 
 ## Stos Technologiczny
-- **Frontend:** React.js, PWA, HTML5-QRCode (obsługa skanera)
-- **Backend:** Python, FastAPI, NumPy (obliczenia przestrzenne)
+- **Frontend:** Moduł Odoo wraz z odpowiednimi rozszerzeniami
+- **Backend:** Python, FastAPI, NumPy (obliczenia przestrzenne), PySerial (komunikacja USB/UART)
 - **Bazy danych:** PostgreSQL (dane relacyjne, historia), Redis (cache danych telemetrycznych RSSI)
-- **Broker wiadomości:** Eclipse Mosquitto (MQTT)
-- **Urządzenia IoT:** Seeed XIAO nRF52840 (C++), Olimex ESP32-POE (C++)
-- **Protokoły komunikacyjne:** REST API, MQTT, Bluetooth Low Energy (BLE 5)
+- **Urządzenia IoT:** Seeed XIAO nRF52840 (C++)
+- **Protokoły komunikacyjne:** REST API, UART (Serial), Bluetooth Low Energy (BLE 5)
 
 ## Architektura i Przepływ Danych
 
-Projekt wykorzystuje hybrydową architekturę Edge Computing połączoną z protokołem BLE (Bluetooth Low Energy) oraz backendem w FastAPI i systemem ERP Odoo.
+Projekt wykorzystuje hybrydową architekturę Edge Computing połączoną z protokołem BLE (Bluetooth Low Energy) oraz backendem w FastAPI i systemem ERP Odoo. Komunikacja sprzęt-serwer opiera się na bezpośrednim połączeniu przewodowym.
 
 ### Topologia Sprzętowa
 
@@ -57,7 +55,7 @@ W systemie pracują 4 mikrokontrolery **Seeed XIAO nRF52840**, z których każdy
 
 ---
 
-### Przepływ 1: Ciągłe Śledzenie Pozycji (Trilateracja w Tle)
+### Przepływ 1: Ciągłe Śledzenie Pozycji (Trylateracja w Tle)
 
 Proces ten działa nieprzerwanie w tle, aktualizując pozycję paczki bez udziału użytkownika.
 
@@ -77,7 +75,7 @@ sequenceDiagram
         B->>A: [BLE] Retransmisja (Odebrano: Paczka X, RSSI: -65dBm)
         Note over A: Agregacja danych (A, B, C)
         A->>API: [USB / UART] Zrzut paczki: "A:-50,B:-65,C:-70"
-        Note over API: Obliczanie pozycji (X, Y) z przecinających się okręgów (Trilateracja)
+        Note over API: Obliczanie pozycji (X, Y) z przecinających się okręgów (Trylateracja)
         API->>O: [API / Baza] Aktualizacja kropki na mapie magazynu
     end
 ```
@@ -106,4 +104,50 @@ sequenceDiagram
     P-->>A: [BLE] Potwierdzenie / Rozłączenie
     Note over A: Wznawia skanowanie RSSI
     A-->>API: [USB / UART] Zwraca status "Sukces"
+```
+
+---
+
+## Schemat Bazy Danych (PostgreSQL)
+
+Baza danych `locator_db` przechowuje stałe punkty referencyjne bramek pomiarowych, aktualny stan zarejestrowanych lokalizatorów na paczkach oraz pełną historię obliczonych pozycji wraz z surowymi odczytami RSSI. Skrypt inicjalizujący strukturę oraz dane testowe znajduje się w pliku `backend/models/init.sql`.
+
+### Struktura Tabel:
+* **`gateways`** – przechowuje identyfikatory bramek (`A`, `B`, `C`), ich nazwy, stałe współrzędne montażowe w magazynie (`pos_x`, `pos_y` wyrażone w metrach) oraz flagę `is_aggregator` wskazującą jednostkę główną podpiętą po USB.
+* **`packages`** – główna tabela aktywnych przesyłek. Zawiera unikalny adres fizyczny `mac_address` modułu XIAO, kod kreskowy przesyłki z systemu Odoo (`package_code`), aktualny status operacyjny (`IDLE`, `LOCATING`, `FOUND`, `MISSING`), ostatnie wyliczone współrzędne (`last_x`, `last_y`) oraz poziom naładowania baterii (`battery_level`).
+* **`location_history`** – dziennik telemetryczny powiązany kluczem obcym z tabelą `packages`. Rejestruje historyczne położenie paczek w czasie wraz z surowymi wartościami sygnału (`rssi_a`, `rssi_b`, `rssi_c`), które posłużyły do wykonania trylateracji.
+
+```mermaid
+erDiagram
+    GATEWAYS {
+        varchar(10) id PK
+        varchar(50) name
+        float pos_x
+        float pos_y
+        boolean is_aggregator
+        timestamp last_heartbeat
+    }
+    PACKAGES {
+        serial id PK
+        varchar(17) mac_address UK
+        varchar(50) package_code UK
+        varchar(20) status
+        float last_x
+        float last_y
+        integer battery_level
+        timestamp last_seen
+        timestamp created_at
+    }
+    LOCATION_HISTORY {
+        serial id PK
+        integer package_id FK
+        float pos_x
+        float pos_y
+        integer rssi_a
+        integer rssi_b
+        integer rssi_c
+        timestamp recorded_at
+    }
+
+    PACKAGES ||--o{ LOCATION_HISTORY : "posiada historie pomiarow"
 ```

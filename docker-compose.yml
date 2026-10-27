@@ -1,15 +1,10 @@
 version: '3.8'
 
 services:
-  mosquitto:
-    image: eclipse-mosquitto:latest
-    ports:
-      - "0.0.0.0:1883:1883"
-    volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
-
   postgres-backend:
     image: postgres:15
+    container_name: locator_postgres
+    restart: always
     environment:
       POSTGRES_DB: locator_db
       POSTGRES_USER: admin
@@ -18,14 +13,19 @@ services:
       - "0.0.0.0:5432:5432"
     volumes:
       - postgres-backend-data:/var/lib/postgresql/data
+      - ./backend/models/init.sql:/docker-entrypoint-initdb.d/init.sql
 
   redis:
     image: redis:alpine
+    container_name: locator_redis
+    restart: always
     ports:
       - "0.0.0.0:6379:6379"
 
   odoo-db:
     image: postgres:15
+    container_name: locator_odoo_db
+    restart: always
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: odoo
@@ -35,20 +35,21 @@ services:
 
   odoo:
     image: odoo:16.0
+    container_name: locator_odoo
+    restart: always
     depends_on:
       - odoo-db
     ports:
-      - "192.168.137.1:8069:8069"
+      - "0.0.0.0:8069:8069"
     environment:
       - HOST=odoo-db
       - USER=odoo
       - PASSWORD=odoo
     volumes:
       - odoo-web-data:/var/lib/odoo
+      - ./odoo_module:/mnt/extra-addons
 
 volumes:
   postgres-backend-data:
   odoo-db-data:
   odoo-web-data:
-
-

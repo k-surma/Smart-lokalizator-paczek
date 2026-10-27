@@ -1,0 +1,14 @@
+# Serwer i API
+fastapi
+uvicorn[standard]
+
+# Komunikacja ze sprzętem
+pyserial
+
+# Obliczenia przestrzenne
+numpy
+
+# Bazy danych (PostgreSQL i Redis)
+sqlalchemy
+psycopg2-binary
+redis
