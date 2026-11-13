@@ -1,55 +1,68 @@
-version: '3.8'
-
 services:
-  postgres-backend:
-    image: postgres:15
+  # 1. Baza danych dla FastAPI (IoT / Tagi BLE)
+  db-locator:
+    image: postgres:15-alpine
     container_name: locator_postgres
     restart: always
     environment:
-      POSTGRES_DB: locator_db
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: locator_db
     ports:
-      - "0.0.0.0:5432:5432"
+      - "5432:5432"
     volumes:
-      - postgres-backend-data:/var/lib/postgresql/data
+      - locator_db_data:/var/lib/postgresql/data
       - ./backend/models/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d locator_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  redis:
-    image: redis:alpine
-    container_name: locator_redis
+  # 2. Serwer Backendowy FastAPI
+  fastapi-backend:
+    build: ./backend
+    container_name: locator_fastapi
     restart: always
     ports:
-      - "0.0.0.0:6379:6379"
+      - "8000:8000"
+    environment:
+      # Zwróć uwagę na nazwę hosta: "db-locator" zamiast "127.0.0.1"
+      DATABASE_URL: postgresql+asyncpg://admin:adminpassword@db-locator:5432/locator_db
+    depends_on:
+      db-locator:
+        condition: service_healthy
 
-  odoo-db:
-    image: postgres:15
-    container_name: locator_odoo_db
+  # 3. Baza danych dla systemu Odoo ERP
+  db-odoo:
+    image: postgres:15-alpine
+    container_name: odoo_postgres
     restart: always
     environment:
-      POSTGRES_DB: postgres
       POSTGRES_USER: odoo
-      POSTGRES_PASSWORD: odoo
+      POSTGRES_PASSWORD: odoopassword
+      POSTGRES_DB: postgres
     volumes:
-      - odoo-db-data:/var/lib/postgresql/data
+      - odoo_db_data:/var/lib/postgresql/data
 
+  # 4. System Odoo ERP
   odoo:
-    image: odoo:16.0
-    container_name: locator_odoo
+    image: odoo:17.0
+    container_name: odoo_erp
     restart: always
     depends_on:
-      - odoo-db
+      - db-odoo
     ports:
-      - "0.0.0.0:8069:8069"
+      - "8069:8069"
     environment:
-      - HOST=odoo-db
-      - USER=odoo
-      - PASSWORD=odoo
+      HOST: db-odoo
+      USER: odoo
+      PASSWORD: odoopassword
     volumes:
-      - odoo-web-data:/var/lib/odoo
-      - ./odoo_module:/mnt/extra-addons
+      - odoo_web_data:/var/lib/odoo
+      - ./addons:/mnt/extra-addons
 
 volumes:
-  postgres-backend-data:
-  odoo-db-data:
-  odoo-web-data:
+  locator_db_data:
+  odoo_db_data:
+  odoo_web_data:
