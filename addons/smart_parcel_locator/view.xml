@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Widok tabeli (List / Tree) -->
+    <record id="view_smart_parcel_tree" model="ir.ui.view">
+        <field name="name">smart.parcel.tree</field>
+        <field name="model">smart.parcel</field>
+        <field name="arch" type="xml">
+            <tree string="Paczki BLE" decoration-success="status == 'FOUND'" decoration-warning="status == 'LOCATING'">
+                <field name="package_code"/>
+                <field name="mac_address"/>
+                <field name="status" widget="badge" decoration-success="status == 'FOUND'" decoration-warning="status == 'LOCATING'" decoration-info="status == 'IDLE'"/>
+                <field name="battery_level" widget="progressbar"/>
+                <field name="last_seen"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- Widok formularza (Form) -->
+    <record id="view_smart_parcel_form" model="ir.ui.view">
+        <field name="name">smart.parcel.form</field>
+        <field name="model">smart.parcel</field>
+        <field name="arch" type="xml">
+            <form string="Paczka BLE">
+                <header>
+                    <field name="status" widget="statusbar" options="{'clickable': '1'}"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Identyfikacja paczki i tagu">
+                            <field name="package_code" placeholder="np. PKG-2026-001"/>
+                            <field name="mac_address" placeholder="np. AA:BB:CC:DD:EE:FF"/>
+                        </group>
+                        <group string="Telemetria BLE">
+                            <field name="battery_level" widget="progressbar"/>
+                            <field name="last_seen"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Akcja otwierająca listę paczek -->
+    <record id="action_smart_parcel" model="ir.actions.act_window">
+        <field name="name">Paczki BLE</field>
+        <field name="res_model">smart.parcel</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <!-- Pozycja w głównym menu Odoo -->
+    <menuitem id="menu_smart_parcel_root" name="Lokalizator BLE" sequence="1"/>
+    <menuitem id="menu_smart_parcel_list" name="Paczki w magazynie" parent="menu_smart_parcel_root" action="action_smart_parcel" sequence="1"/>
+</odoo>
