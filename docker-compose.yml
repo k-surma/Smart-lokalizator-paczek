@@ -1,39 +1,4 @@
 services:
-  # 1. Baza danych dla FastAPI (IoT / Tagi BLE)
-  db-locator:
-    image: postgres:15-alpine
-    container_name: locator_postgres
-    restart: always
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: adminpassword
-      POSTGRES_DB: locator_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - locator_db_data:/var/lib/postgresql/data
-      - ./backend/models/init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d locator_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # 2. Serwer Backendowy FastAPI
-  fastapi-backend:
-    build: ./backend
-    container_name: locator_fastapi
-    restart: always
-    ports:
-      - "8000:8000"
-    environment:
-      # Zwróć uwagę na nazwę hosta: "db-locator" zamiast "127.0.0.1"
-      DATABASE_URL: postgresql+asyncpg://admin:adminpassword@db-locator:5432/locator_db
-    depends_on:
-      db-locator:
-        condition: service_healthy
-
-  # 3. Baza danych dla systemu Odoo ERP
   db-odoo:
     image: postgres:15-alpine
     container_name: odoo_postgres
@@ -41,28 +6,45 @@ services:
     environment:
       POSTGRES_USER: odoo
       POSTGRES_PASSWORD: odoopassword
-      POSTGRES_DB: postgres
+      POSTGRES_DB: odoo_db
     volumes:
       - odoo_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odoo -d odoo_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # 4. System Odoo ERP
   odoo:
     image: odoo:17.0
     container_name: odoo_erp
     restart: always
     depends_on:
-      - db-odoo
+      db-odoo:
+        condition: service_healthy
     ports:
       - "8069:8069"
     environment:
       HOST: db-odoo
       USER: odoo
       PASSWORD: odoopassword
+    command: odoo -d odoo_db --without-demo=all
     volumes:
       - odoo_web_data:/var/lib/odoo
       - ./addons:/mnt/extra-addons
 
+  fastapi-backend:
+    build: ./backend
+    container_name: locator_fastapi
+    restart: always
+    depends_on:
+      db-odoo:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://odoo:odoopassword@db-odoo:5432/odoo_db
+    ports:
+      - "8000:8000"
+
 volumes:
-  locator_db_data:
   odoo_db_data:
   odoo_web_data:
