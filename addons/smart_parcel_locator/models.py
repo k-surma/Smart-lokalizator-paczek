@@ -1,4 +1,4 @@
-﻿import os
+import os
 import requests
 from odoo import models, fields
 from odoo.exceptions import UserError
