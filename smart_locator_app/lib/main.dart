@@ -1,45 +1,78 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:http/http.dart' as http;
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+const String apiBaseUrl = "http://63.187.131.29:8000";
+const String gattServiceUuid = "19b10000-e8f2-537e-4f6c-d104768a1214";
+const String gattBuzzerCharUuid = "19b10001-e8f2-537e-4f6c-d104768a1214";
+
 void main() {
-  runApp(const SmartParcelApp());
+  runApp(const SmartLocatorApp());
 }
 
-class SmartParcelApp extends StatelessWidget {
-  const SmartParcelApp({super.key});
+class SmartLocatorApp extends StatelessWidget {
+  const SmartLocatorApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Smart Lokalizator Paczek',
+      title: 'PUDO Smart Lokalizator',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        colorSchemeSeed: Colors.amber,
         useMaterial3: true,
       ),
-      home: const PackageListScreen(),
+      home: const HomeScreen(),
     );
   }
 }
 
-class PackageListScreen extends StatefulWidget {
-  const PackageListScreen({super.key});
+class QrScannerPage extends StatefulWidget {
+  final String title;
+  const QrScannerPage({super.key, required this.title});
 
   @override
-  State<PackageListScreen> createState() => _PackageListScreenState();
+  State<QrScannerPage> createState() => _QrScannerPageState();
 }
 
-class _PackageListScreenState extends State<PackageListScreen> {
-  // STAŁE ELASTIC IP INSTANCJI AWS EC2:
-  String awsBaseUrl = "http://63.187.131.29:8000";
+class _QrScannerPageState extends State<QrScannerPage> {
+  bool _scanned = false;
 
-  List<dynamic> packages = [];
-  bool isLoading = false;
-  String? errorMessage;
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.title)),
+      body: MobileScanner(
+        onDetect: (BarcodeCapture capture) {
+          if (_scanned) return;
+          for (final barcode in capture.barcodes) {
+            final value = barcode.rawValue;
+            if (value != null && value.trim().isNotEmpty) {
+              _scanned = true;
+              Navigator.of(context).pop(value.trim());
+              break;
+            }
+          }
+        },
+      ),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  List<dynamic> _packages = [];
+  bool _loading = false;
 
   @override
   void initState() {
@@ -52,217 +85,334 @@ class _PackageListScreenState extends State<PackageListScreen> {
     await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
-      Permission.location,
+      Permission.locationWhenInUse,
+      Permission.camera,
     ].request();
   }
 
-  // 1. POBIERANIE LISTY PACZEK Z AWS (GET /api/packages)
   Future<void> _fetchPackages() async {
-    setState(() {
-      isLoading = true;
-      errorMessage = null;
-    });
-
+    setState(() => _loading = true);
     try {
-      final response = await http
-          .get(Uri.parse('$awsBaseUrl/api/packages'))
-          .timeout(const Duration(seconds: 5));
-
-      if (response.statusCode == 200) {
-        setState(() {
-          packages = jsonDecode(response.body);
-        });
-      } else {
-        setState(() {
-          errorMessage = "Błąd serwera: HTTP ${response.statusCode}";
-        });
+      final resp = await http.get(Uri.parse("$apiBaseUrl/api/packages"));
+      if (resp.statusCode == 200) {
+        setState(() => _packages = jsonDecode(resp.body));
       }
     } catch (e) {
-      setState(() {
-        errorMessage =
-            "Brak połączenia z $awsBaseUrl.\nUpewnij się, że kontenery na AWS działają, a port 8000 jest otwarty.\n\nSzczegóły: $e";
-      });
+      _showSnack("Błąd połączenia z serwerem: $e", isError: true);
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  // 2. REJESTRACJA NOWEJ PACZKI (POST /api/packages/register)
-  Future<void> _registerPackage(String code, String mac) async {
-    try {
-      final response = await http.post(
-        Uri.parse('$awsBaseUrl/api/packages/register'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "package_code": code.trim(),
-          "mac_address": mac.trim().toUpperCase(),
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        _fetchPackages();
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Dodano paczkę $code')),
-          );
-        }
-      } else {
-        throw Exception(response.body);
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Błąd rejestracji: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  // 3. ZMIANA STATUSU NA "LOCATING" (POST /api/locate/{mac})
-  Future<void> _setLocatingStatus(String mac) async {
-    try {
-      await http.post(Uri.parse('$awsBaseUrl/api/locate/$mac'));
-      _fetchPackages();
-    } catch (_) {}
-  }
-
-  // 4. AKTUALIZACJA STATUSU NA "FOUND" LUB "IDLE" (PATCH /api/packages/{mac}/status)
-  Future<void> _updateStatus(String mac, String newStatus, {int? battery}) async {
-    try {
-      await http.patch(
-        Uri.parse('$awsBaseUrl/api/packages/$mac/status'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "status": newStatus,
-          if (battery != null) "battery_level": battery,
-        }),
-      );
-      _fetchPackages();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Błąd aktualizacji statusu: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  // Okienko zmiany adresu IP serwera AWS
-  void _showServerSettingsDialog() {
-    final controller = TextEditingController(text: awsBaseUrl);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Adres serwera AWS"),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: "URL FastAPI (z portem 8000)",
-            hintText: "http://63.187.131.29:8000",
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Anuluj"),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              setState(() {
-                awsBaseUrl = controller.text.trim().replaceAll(RegExp(r'/$'), '');
-              });
-              Navigator.pop(ctx);
-              _fetchPackages();
-            },
-            child: const Text("Zapisz i połącz"),
-          ),
-        ],
+  void _showSnack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: isError ? Colors.red.shade700 : Colors.green.shade700,
+        duration: const Duration(seconds: 4),
       ),
     );
   }
 
-  // Okienko dodawania nowej paczki
-  void _showAddPackageDialog() {
-    final codeCtrl = TextEditingController(text: "PKG-2026-00${packages.length + 1}");
-    final macCtrl = TextEditingController(text: "AA:BB:CC:DD:EE:0${packages.length + 1}");
-    showDialog(
+  Future<String?> _scanCode(String title) async {
+    return Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => QrScannerPage(title: title)),
+    );
+  }
+
+  Future<void> _showAcceptDialog({required bool isOutbound}) async {
+    final codeCtrl = TextEditingController();
+    final macCtrl = TextEditingController();
+
+    await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Zarejestruj paczkę"),
+        title: Text(isOutbound
+            ? "Przyjmij NADANIE od klienta"
+            : "Przyjmij paczkę OD KURIERA"),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: codeCtrl,
-              decoration: const InputDecoration(
-                labelText: "Kod paczki (np. PKG-2026-002)",
+              decoration: InputDecoration(
+                labelText: "Kod paczki / ID InPost",
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  onPressed: () async {
+                    final scanned = await _scanCode("Skanuj etykietę InPost");
+                    if (scanned != null) codeCtrl.text = scanned;
+                  },
+                ),
               ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: macCtrl,
+              textCapitalization: TextCapitalization.characters,
               decoration: const InputDecoration(
-                labelText: "Adres MAC urządzenia BLE",
+                labelText: "Adres MAC lokalizatora XIAO",
+                hintText: "np. AA:BB:CC:DD:EE:FF",
               ),
             ),
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Anuluj"),
-          ),
-          ElevatedButton(
-            onPressed: () {
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Anuluj")),
+          FilledButton(
+            onPressed: () async {
+              final code = codeCtrl.text.trim();
+              final mac = macCtrl.text.trim().toUpperCase();
+              if (code.isEmpty || mac.isEmpty) {
+                _showSnack("Wpisz kod paczki i adres MAC", isError: true);
+                return;
+              }
               Navigator.pop(ctx);
-              _registerPackage(codeCtrl.text, macCtrl.text);
+              await _submitAccept(code: code, mac: mac, isOutbound: isOutbound);
             },
-            child: const Text("Dodaj do bazy"),
+            child: const Text("Sprawdź w InPost i połącz"),
           ),
         ],
       ),
     );
   }
 
-  // Otwarcie ekranu Radaru BLE dla wybranej paczki
-  void _openRadarSheet(Map<String, dynamic> pkg) async {
-    final String mac = pkg['mac_address'];
-    await _setLocatingStatus(mac);
-
-    if (!mounted) return;
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => RadarScannerSheet(
-        packageCode: pkg['package_code'],
-        targetMac: mac,
-        onFound: () async {
-          await _updateStatus(mac, "FOUND", battery: 95);
-        },
-        onResetIdle: () async {
-          await _updateStatus(mac, "IDLE");
-        },
-      ),
-    );
-    _fetchPackages();
+  Future<void> _submitAccept({
+    required String code,
+    required String mac,
+    required bool isOutbound,
+  }) async {
+    final endpoint = isOutbound
+        ? "$apiBaseUrl/api/inpost/accept-outbound"
+        : "$apiBaseUrl/api/inpost/accept-inbound";
+    try {
+      final resp = await http.post(
+        Uri.parse(endpoint),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"code": code, "mac_address": mac}),
+      );
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body);
+        await _fetchPackages();
+        if (!isOutbound && data["pickup_code"] != null) {
+          _showPickupCodeDialog(data);
+        } else {
+          _showSnack("Nadana w punkcie: ${data['package_code']} (MAC: $mac)");
+        }
+      } else {
+        final err = jsonDecode(resp.body)["detail"] ?? resp.body;
+        _showSnack("Błąd: $err", isError: true);
+      }
+    } catch (e) {
+      _showSnack("Błąd sieci: $e", isError: true);
+    }
   }
 
-  Color _getStatusColor(String status) {
-    switch (status) {
-      case 'FOUND':
-        return Colors.green;
-      case 'LOCATING':
-        return Colors.orange;
+  void _showPickupCodeDialog(Map<String, dynamic> pkg) {
+    final phone = (pkg["recipient_phone"] ?? "").toString();
+    final last4 = phone.length >= 4 ? phone.substring(phone.length - 4) : "brak";
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Status: Do odbioru w punkcie"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Numer: ${pkg['package_code']}"),
+            Text("Gabaryt: ${pkg['parcel_size'] ?? '-'}  |  MAC: ${pkg['mac_address']}"),
+            const Divider(),
+            Text("4 ostatnie cyfry tel.: $last4",
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text("Kod odbioru (PIN): ${pkg['pickup_code']}",
+                style: const TextStyle(
+                    fontSize: 22, fontWeight: FontWeight.bold, color: Colors.indigo)),
+          ],
+        ),
+        actions: [
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _courierPickupFlow() async {
+    final qr = await _scanCode("Skanuj QR kuriera (Nadanie)");
+    if (qr == null) return;
+    try {
+      final resp = await http.post(
+        Uri.parse("$apiBaseUrl/api/inpost/courier-pickup"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"code": qr}),
+      );
+      if (resp.statusCode == 200) {
+        final pkg = jsonDecode(resp.body);
+        await _fetchPackages();
+        _openRadarSheet(pkg);
+      } else {
+        final err = jsonDecode(resp.body)["detail"] ?? resp.body;
+        _showSnack("Błąd: $err", isError: true);
+      }
+    } catch (e) {
+      _showSnack("Błąd sieci: $e", isError: true);
+    }
+  }
+
+  Future<void> _showClientVerifyDialog() async {
+    final phone4Ctrl = TextEditingController();
+    final qrCtrl = TextEditingController();
+    final pinCtrl = TextEditingController();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Wydaj paczkę klientowi"),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: phone4Ctrl,
+                keyboardType: TextInputType.number,
+                maxLength: 4,
+                decoration: const InputDecoration(
+                  labelText: "4 ostatnie cyfry telefonu klienta",
+                  hintText: "np. 0700",
+                ),
+              ),
+              const Text("— LUB —", style: TextStyle(color: Colors.grey)),
+              TextField(
+                controller: qrCtrl,
+                decoration: InputDecoration(
+                  labelText: "Kod QR klienta",
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.qr_code_scanner),
+                    onPressed: () async {
+                      final scanned = await _scanCode("Skanuj QR klienta");
+                      if (scanned != null) qrCtrl.text = scanned;
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: pinCtrl,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                decoration: const InputDecoration(
+                  labelText: "6-cyfrowy kod odbioru (PIN)",
+                  hintText: "np. 482910",
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Anuluj")),
+          FilledButton(
+            onPressed: () async {
+              final pin = pinCtrl.text.trim();
+              final last4 = phone4Ctrl.text.trim();
+              final qr = qrCtrl.text.trim();
+              if (pin.isEmpty || (last4.isEmpty && qr.isEmpty)) {
+                _showSnack("Podaj PIN oraz 4 cyfry tel. lub QR", isError: true);
+                return;
+              }
+              Navigator.pop(ctx);
+              await _verifyClientAndLocate(pin: pin, phoneLast4: last4, qrCode: qr);
+            },
+            child: const Text("Znajdź i lokalizuj"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _verifyClientAndLocate({
+    required String pin,
+    String? phoneLast4,
+    String? qrCode,
+  }) async {
+    try {
+      final resp = await http.post(
+        Uri.parse("$apiBaseUrl/api/inpost/client-verify"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "pickup_code": pin,
+          "phone_last4": (phoneLast4 != null && phoneLast4.isNotEmpty) ? phoneLast4 : null,
+          "qr_code": (qrCode != null && qrCode.isNotEmpty) ? qrCode : null,
+        }),
+      );
+      if (resp.statusCode == 200) {
+        final pkg = jsonDecode(resp.body);
+        await _fetchPackages();
+        _openRadarSheet(pkg);
+      } else {
+        final err = jsonDecode(resp.body)["detail"] ?? resp.body;
+        _showSnack("Odmowa: $err", isError: true);
+      }
+    } catch (e) {
+      _showSnack("Błąd sieci: $e", isError: true);
+    }
+  }
+
+  Future<void> _markAsDelivered(int packageId) async {
+    try {
+      final resp = await http.post(Uri.parse("$apiBaseUrl/api/packages/$packageId/deliver"));
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body);
+        await _fetchPackages();
+        _showSnack(data["inpost_sync_info"] ?? "Oznaczono jako wydaną!");
+      } else {
+        final err = jsonDecode(resp.body)["detail"] ?? resp.body;
+        _showSnack("Błąd wydania: $err", isError: true);
+      }
+    } catch (e) {
+      _showSnack("Błąd sieci: $e", isError: true);
+    }
+  }
+
+  Future<void> _updateStatus(String mac, String status, {int? battery}) async {
+    try {
+      await http.patch(
+        Uri.parse("$apiBaseUrl/api/packages/$mac/status"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"status": status, "battery_level": battery}),
+      );
+      await _fetchPackages();
+    } catch (_) {}
+  }
+
+  void _openRadarSheet(Map<String, dynamic> pkg) {
+    final mac = pkg["mac_address"]?.toString();
+    if (mac == null || mac.isEmpty) {
+      _showSnack("Ta paczka nie ma przypiętego tagu BLE", isError: true);
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => BleRadarSheet(
+        pkg: pkg,
+        onFound: () async => _updateStatus(mac, "FOUND", battery: 95),
+        onDeliver: () async => _markAsDelivered(pkg["id"]),
+      ),
+    ).then((_) => _fetchPackages());
+  }
+
+  String _formatPudoStatus(String? s) {
+    switch (s) {
+      case "dispatched_by_sender":
+        return "Nadana w punkcie";
+      case "ready_to_pickup":
+        return "Do odbioru";
+      case "collected_from_sender":
+        return "Odebrana przez kuriera";
+      case "delivered":
+        return "Wydana klientowi";
       default:
-        return Colors.blueGrey;
+        return "Do nadania";
     }
   }
 
@@ -270,373 +420,288 @@ class _PackageListScreenState extends State<PackageListScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Magazyn BLE (63.187.131.29)"),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: const Text("PUDO Lokalizator (InPost + BLE)"),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: "Odśwież listę",
-            onPressed: _fetchPackages,
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: "Ustawienia IP AWS",
-            onPressed: _showServerSettingsDialog,
-          ),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchPackages),
         ],
       ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : errorMessage != null
-              ? Padding(
-                  padding: const EdgeInsets.all(24.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.cloud_off, size: 64, color: Colors.redAccent),
-                      const SizedBox(height: 16),
-                      Text(errorMessage!, textAlign: TextAlign.center),
-                      const SizedBox(height: 20),
-                      ElevatedButton.icon(
-                        onPressed: _fetchPackages,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text("Spróbuj ponownie"),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(backgroundColor: Colors.indigo),
+                        icon: const Icon(Icons.archive_outlined),
+                        label: const Text("Nadanie\n(od klienta)", textAlign: TextAlign.center),
+                        onPressed: () => _showAcceptDialog(isOutbound: true),
                       ),
-                    ],
-                  ),
-                )
-              : RefreshIndicator(
-                  onRefresh: _fetchPackages,
-                  child: packages.isEmpty
-                      ? const Center(child: Text("Brak paczek w bazie."))
-                      : ListView.builder(
-                          padding: const EdgeInsets.all(12),
-                          itemCount: packages.length,
-                          itemBuilder: (ctx, i) {
-                            final pkg = packages[i];
-                            final status = pkg['status'] ?? 'IDLE';
-                            return Card(
-                              elevation: 2,
-                              margin: const EdgeInsets.symmetric(vertical: 6),
-                              child: ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: _getStatusColor(status),
-                                  child: const Icon(Icons.inventory_2, color: Colors.white),
-                                ),
-                                title: Text(
-                                  pkg['package_code'] ?? 'Brak kodu',
-                                  style: const TextStyle(fontWeight: FontWeight.bold),
-                                ),
-                                subtitle: Text(
-                                  "MAC: ${pkg['mac_address']}\nBateria: ${pkg['battery_level']}% | Status: $status",
-                                ),
-                                isThreeLine: true,
-                                trailing: FilledButton.icon(
-                                  onPressed: () => _openRadarSheet(pkg),
-                                  icon: const Icon(Icons.radar),
-                                  label: const Text("Lokalizuj"),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(backgroundColor: Colors.blueGrey),
+                        icon: const Icon(Icons.local_shipping_outlined),
+                        label: const Text("Wydaj kurierowi\n(QR)", textAlign: TextAlign.center),
+                        onPressed: _courierPickupFlow,
+                      ),
+                    ),
+                  ],
                 ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddPackageDialog,
-        icon: const Icon(Icons.add),
-        label: const Text("Nowa paczka"),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(backgroundColor: Colors.teal),
+                        icon: const Icon(Icons.move_to_inbox),
+                        label: const Text("Przyjmij\nod kuriera", textAlign: TextAlign.center),
+                        onPressed: () => _showAcceptDialog(isOutbound: false),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(backgroundColor: Colors.amber.shade800),
+                        icon: const Icon(Icons.person_pin_circle_outlined),
+                        label: const Text("Wydaj klientowi\n(PIN / QR)", textAlign: TextAlign.center),
+                        onPressed: _showClientVerifyDialog,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                    onRefresh: _fetchPackages,
+                    child: ListView.builder(
+                      itemCount: _packages.length,
+                      itemBuilder: (_, i) {
+                        final p = _packages[i];
+                        final isOutbound = p["direction"] == "OUTBOUND";
+                        final status = p["status"] ?? "IDLE";
+                        final isDelivered = status == "DELIVERED";
+                        final mac = p["mac_address"];
+                        final pin = p["pickup_code"];
+                        final size = p["parcel_size"] ?? "-";
+                        final pudoLabel = _formatPudoStatus(p["inpost_pudo_status"]);
+
+                        return Card(
+                          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          child: ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: isOutbound ? Colors.indigo : Colors.teal,
+                              foregroundColor: Colors.white,
+                              child: Text(isOutbound ? "NAD" : "ODB",
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                            ),
+                            title: Text("${p['package_code']}",
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text("Gabaryt: $size  |  MAC: ${mac ?? 'zwolniony'}"),
+                                if (pin != null)
+                                  Text("PIN: $pin  |  Tel: ${p['recipient_phone'] ?? '-'}",
+                                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                                Text("InPost PUDO: $pudoLabel  ($status)",
+                                    style: TextStyle(
+                                        color: isDelivered ? Colors.grey : Colors.deepOrange,
+                                        fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                            trailing: isDelivered
+                                ? const Icon(Icons.check_circle, color: Colors.grey)
+                                : IconButton(
+                                    icon: const Icon(Icons.radar, color: Colors.deepOrange),
+                                    onPressed: () async {
+                                      if (mac != null) {
+                                        await http.post(Uri.parse("$apiBaseUrl/api/locate/$mac"));
+                                        _openRadarSheet(p);
+                                      }
+                                    },
+                                  ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+        ],
       ),
     );
   }
 }
 
-// ============================================================================
-// KOMPONENT RADARU BLE: CIĄGŁE SKANOWANIE + FILTR WIELODROGOWOŚCI (UŚREDNIANIE)
-// ============================================================================
-class RadarScannerSheet extends StatefulWidget {
-  final String packageCode;
-  final String targetMac;
+class BleRadarSheet extends StatefulWidget {
+  final Map<String, dynamic> pkg;
   final Future<void> Function() onFound;
-  final Future<void> Function() onResetIdle;
+  final Future<void> Function() onDeliver;
 
-  const RadarScannerSheet({
+  const BleRadarSheet({
     super.key,
-    required this.packageCode,
-    required this.targetMac,
+    required this.pkg,
     required this.onFound,
-    required this.onResetIdle,
+    required this.onDeliver,
   });
 
   @override
-  State<RadarScannerSheet> createState() => _RadarScannerSheetState();
+  State<BleRadarSheet> createState() => _BleRadarSheetState();
 }
 
-class _RadarScannerSheetState extends State<RadarScannerSheet> {
+class _BleRadarSheetState extends State<BleRadarSheet> {
+  final List<int> _rssiWindow = [];
+  static const int _windowSize = 10;
+  double _threshold = -60.0;
+  double? _filteredRssi;
+  bool _triggered = false;
   StreamSubscription<List<ScanResult>>? _scanSub;
 
-  // Bufor próbek RSSI do filtracji wielodrogowości
-  final List<int> _rssiBuffer = [];
-  int _windowSize = 10; // Liczba próbek w oknie uśredniania (regulowana suwakiem)
-
-  int? _rawRssi; // Ostatni surowy odczyt z radia
-  double? _smoothedRssi; // Uśredniony odczyt po odrzuceniu skrajnych pików
-
-  double rssiThreshold = -55; // Próg zaliczenia znalezienia paczki
-  bool _foundSentToServer = false; // Czy wysłano już status FOUND do AWS
-  String statusLog = "Ciągłe skanowanie pasma BLE...";
+  String get _targetMac => (widget.pkg["mac_address"] ?? "").toString().toUpperCase();
 
   @override
   void initState() {
     super.initState();
-    _startContinuousBleScan();
+    _startBleScan();
   }
 
-  // Algorytm: Średnia krocząca obcięta (Trimmed Moving Average)
-  // Odrzuca skrajny najwyższy pik (odbicie fali) i najniższy spadek, uśredniając resztę
-  double _computeFilteredRssi(int newSample) {
-    _rssiBuffer.add(newSample);
-    while (_rssiBuffer.length > _windowSize) {
-      _rssiBuffer.removeAt(0);
-    }
-
-    if (_rssiBuffer.length < 5) {
-      // Przy małej liczbie próbek liczona jest zwykła średnia arytmetyczna
-      final sum = _rssiBuffer.reduce((a, b) => a + b);
-      return sum / _rssiBuffer.length;
-    }
-
-    // Kopiujemy i sortujemy bufor, aby odciąć skrajny pik min i max
-    final sorted = List<int>.from(_rssiBuffer)..sort();
-    final trimmed = sorted.sublist(1, sorted.length - 1);
-    final sum = trimmed.reduce((a, b) => a + b);
-    return sum / trimmed.length;
+  Future<void> _startBleScan() async {
+    await FlutterBluePlus.stopScan();
+    _scanSub = FlutterBluePlus.scanResults.listen((results) {
+      for (final r in results) {
+        if (r.device.remoteId.str.toUpperCase() == _targetMac) {
+          _addRssiSample(r.rssi, r.device);
+        }
+      }
+    });
+    await FlutterBluePlus.startScan(
+      timeout: const Duration(minutes: 3),
+      androidScanMode: AndroidScanMode.lowLatency,
+    );
   }
 
-  Future<void> _startContinuousBleScan() async {
+  void _addRssiSample(int rssi, BluetoothDevice device) {
+    _rssiWindow.add(rssi);
+    if (_rssiWindow.length > _windowSize) _rssiWindow.removeAt(0);
+
+    double avg;
+    if (_rssiWindow.length >= 4) {
+      final sorted = List<int>.from(_rssiWindow)..sort();
+      final trimmed = sorted.sublist(1, sorted.length - 1);
+      avg = trimmed.reduce((a, b) => a + b) / trimmed.length;
+    } else {
+      avg = _rssiWindow.reduce((a, b) => a + b) / _rssiWindow.length;
+    }
+
+    if (mounted) setState(() => _filteredRssi = avg);
+
+    if (!_triggered && avg >= _threshold) {
+      _triggered = true;
+      _triggerGattBuzzer(device);
+      widget.onFound();
+    }
+  }
+
+  Future<void> _triggerGattBuzzer(BluetoothDevice device) async {
     try {
-      await FlutterBluePlus.startScan(
-        androidScanMode: AndroidScanMode.lowLatency,
-        continuousUpdates: true,
-      );
-
-      _scanSub = FlutterBluePlus.scanResults.listen((results) async {
-        for (ScanResult r in results) {
-          // Podgląd wszystkich urządzeń w konsoli CMD (ułatwia szukanie MAC)
-          debugPrint(
-            "BLE: ${r.device.remoteId.str} | Nazwa: ${r.advertisementData.advName} | Raw RSSI: ${r.rssi} dBm",
-          );
-
-          if (r.device.remoteId.str.toUpperCase() == widget.targetMac.toUpperCase()) {
-            final filtered = _computeFilteredRssi(r.rssi);
-
-            if (mounted) {
-              setState(() {
-                _rawRssi = r.rssi;
-                _smoothedRssi = filtered;
-                statusLog =
-                    "Skaner aktywny (bufor: ${_rssiBuffer.length}/$_windowSize próbek)";
-              });
-            }
-
-            // Jeśli uśredniony sygnał przekroczy próg, aktualizujemy status w AWS,
-            // ALE NIE ZATRZYMUJEMY SKANERA!
-            if (filtered >= rssiThreshold && !_foundSentToServer) {
-              _foundSentToServer = true;
-              await widget.onFound();
-              if (mounted) {
-                setState(() {
-                  statusLog =
-                      "Próg osiągnięty! Wysłano FOUND do AWS (skaner działa dalej)";
-                });
-              }
+      await device.connect(timeout: const Duration(seconds: 5));
+      final services = await device.discoverServices();
+      for (final s in services) {
+        if (s.uuid.toString().toLowerCase() == gattServiceUuid) {
+          for (final c in s.characteristics) {
+            if (c.uuid.toString().toLowerCase() == gattBuzzerCharUuid) {
+              await c.write([0x01]);
             }
           }
         }
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          statusLog = "Błąd skanera BLE: $e";
-        });
       }
-    }
-  }
-
-  void _clearBuffer() {
-    setState(() {
-      _rssiBuffer.clear();
-      _rawRssi = null;
-      _smoothedRssi = null;
-      _foundSentToServer = false;
-      statusLog = "Bufor wyczyszczony – zbieranie nowych próbek...";
-    });
+      await device.disconnect();
+    } catch (_) {}
   }
 
   @override
   void dispose() {
-    // Skaner wyłącza się dopiero w momencie zamknięcia okna radaru
-    FlutterBluePlus.stopScan();
     _scanSub?.cancel();
+    FlutterBluePlus.stopScan();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    double proximityProgress = 0.0;
-    if (_smoothedRssi != null) {
-      proximityProgress = ((_smoothedRssi! + 100) / 60).clamp(0.0, 1.0);
-    }
-
-    final bool isAboveThreshold =
-        _smoothedRssi != null && _smoothedRssi! >= rssiThreshold;
-
+    final isOutbound = widget.pkg["direction"] == "OUTBOUND";
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            "Radar: ${widget.packageCode}",
-            style: Theme.of(context).textTheme.headlineSmall,
+            isOutbound ? "Szukanie NADANIA dla kuriera" : "Szukanie paczki DLA KLIENTA",
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
-          Text("Szukany MAC: ${widget.targetMac}"),
+          const SizedBox(height: 6),
+          Text("Kod: ${widget.pkg['package_code']}"),
+          Text("Gabaryt: ${widget.pkg['parcel_size'] ?? '-'}  |  MAC: $_targetMac",
+              style: const TextStyle(color: Colors.black54)),
           const SizedBox(height: 16),
-
-          // GŁÓWNY WSKAŹNIK: UŚREDNIONE RSSI
-          const Text(
-            "UŚREDNIONE RSSI (filtr wielodrogowości):",
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey),
-          ),
           Text(
-            _smoothedRssi != null
-                ? "${_smoothedRssi!.toStringAsFixed(1)} dBm"
-                : "-- dBm",
+            _filteredRssi == null ? "Skanowanie BLE..." : "${_filteredRssi!.toStringAsFixed(1)} dBm",
             style: TextStyle(
-              fontSize: 46,
+              fontSize: 34,
               fontWeight: FontWeight.bold,
-              color: isAboveThreshold ? Colors.green : Colors.indigo,
+              color: _triggered ? Colors.green : Colors.deepOrange,
             ),
           ),
-
-          // POMOCNICZY WSKAŹNIK: SUROWY ODCZYT CHWILOWY
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade200,
-              borderRadius: BorderRadius.circular(16),
+          if (_triggered)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text("ZNALEZIONO! Sygnał wysłany do lokalizatora.",
+                  style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
             ),
-            child: Text(
-              "Surowy odczyt chwilowy (Raw): ${_rawRssi ?? '--'} dBm  |  Bufor: ${_rssiBuffer.length}/$_windowSize",
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-            ),
-          ),
-
-          const SizedBox(height: 14),
-          LinearProgressIndicator(
-            value: proximityProgress,
-            minHeight: 14,
-            borderRadius: BorderRadius.circular(8),
-            color: isAboveThreshold ? Colors.green : Colors.orange,
-          ),
-          const SizedBox(height: 16),
-
-          // SUWAK 1: PRÓG ZADZIAŁANIA (dBm)
+          const SizedBox(height: 10),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text("Próg zaliczenia (FOUND):"),
-              Text(
-                "${rssiThreshold.toInt()} dBm",
-                style: const TextStyle(fontWeight: FontWeight.bold),
+              const Text("Próg dBm:"),
+              Expanded(
+                child: Slider(
+                  min: -90,
+                  max: -30,
+                  divisions: 60,
+                  value: _threshold,
+                  label: "${_threshold.round()} dBm",
+                  onChanged: (v) => setState(() => _threshold = v),
+                ),
               ),
+              Text("${_threshold.round()}"),
             ],
           ),
-          Slider(
-            value: rssiThreshold,
-            min: -90,
-            max: -30,
-            divisions: 60,
-            label: "${rssiThreshold.toInt()} dBm",
-            onChanged: (val) {
-              setState(() {
-                rssiThreshold = val;
-                _foundSentToServer = false;
-              });
-            },
-          ),
-
-          // SUWAK 2: ROZMIAR OKNA UŚREDNIANIA (LICZBA PRÓBEK)
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text("Okno uśredniania (tłumienie pików):"),
-              Text(
-                "$_windowSize próbek",
-                style: const TextStyle(fontWeight: FontWeight.bold),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.green.shade700,
+                padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-            ],
-          ),
-          Slider(
-            value: _windowSize.toDouble(),
-            min: 3,
-            max: 30,
-            divisions: 27,
-            label: "$_windowSize próbek",
-            onChanged: (val) {
-              setState(() {
-                _windowSize = val.toInt();
-                while (_rssiBuffer.length > _windowSize) {
-                  _rssiBuffer.removeAt(0);
-                }
-              });
-            },
-          ),
-
-          const SizedBox(height: 4),
-          Text(
-            statusLog,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontStyle: FontStyle.italic, fontSize: 13),
-          ),
-          const Divider(height: 24),
-
-          // PRZYCISKI STERUJĄCE
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            alignment: WrapAlignment.center,
-            children: [
-              OutlinedButton.icon(
-                onPressed: _clearBuffer,
-                icon: const Icon(Icons.cleaning_services, size: 18),
-                label: const Text("Wyczyść bufor"),
+              icon: const Icon(Icons.check_circle_outline),
+              label: Text(
+                isOutbound
+                    ? "Potwierdź wydanie KURIEROWI (Odoo)"
+                    : "Potwierdź wydanie KLIENTOWI (InPost + Odoo)",
               ),
-              ElevatedButton.icon(
-                onPressed: () async {
-                  await widget.onFound();
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Wysłano status FOUND do AWS")),
-                    );
-                  }
-                },
-                icon: const Icon(Icons.check_circle, color: Colors.green, size: 18),
-                label: const Text("Wymuś FOUND"),
-              ),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  _foundSentToServer = false;
-                  await widget.onResetIdle();
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Zresetowano status na IDLE")),
-                    );
-                  }
-                },
-                icon: const Icon(Icons.restart_alt, size: 18),
-                label: const Text("Reset IDLE"),
-              ),
-            ],
+              onPressed: () async {
+                await widget.onDeliver();
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
           ),
         ],
       ),

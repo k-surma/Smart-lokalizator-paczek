@@ -41,7 +41,9 @@ services:
       db-odoo:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+asyncpg://odoo:odoopassword@db-odoo:5432/odoo_db
+      - DATABASE_URL=postgresql+asyncpg://odoo:odoopassword@db-odoo:5432/odoo_db
+      - INPOST_ORG_ID=${INPOST_ORG_ID}
+      - INPOST_TOKEN=${INPOST_TOKEN}
     ports:
       - "8000:8000"
 

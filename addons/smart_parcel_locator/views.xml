@@ -4,10 +4,25 @@
         <field name="name">smart.parcel.tree</field>
         <field name="model">smart.parcel</field>
         <field name="arch" type="xml">
-            <tree string="Paczki BLE" decoration-success="status == 'FOUND'" decoration-warning="status == 'LOCATING'">
+            <tree string="Paczki PUDO BLE"
+                  decoration-muted="status == 'DELIVERED'"
+                  decoration-success="status == 'FOUND'"
+                  decoration-warning="status == 'LOCATING'">
+                <field name="direction" widget="badge" decoration-info="direction == 'INBOUND'" decoration-primary="direction == 'OUTBOUND'"/>
                 <field name="package_code"/>
+                <field name="parcel_size"/>
+                <field name="inpost_pudo_status" widget="badge"
+                       decoration-info="inpost_pudo_status == 'dispatched_by_sender'"
+                       decoration-success="inpost_pudo_status == 'ready_to_pickup'"
+                       decoration-muted="inpost_pudo_status in ('delivered', 'collected_from_sender')"/>
                 <field name="mac_address"/>
-                <field name="status" widget="badge" decoration-success="status == 'FOUND'" decoration-warning="status == 'LOCATING'" decoration-info="status == 'IDLE'"/>
+                <field name="recipient_phone"/>
+                <field name="pickup_code"/>
+                <field name="status" widget="badge"
+                       decoration-info="status == 'IDLE'"
+                       decoration-warning="status == 'LOCATING'"
+                       decoration-success="status == 'FOUND'"
+                       decoration-muted="status == 'DELIVERED'"/>
                 <field name="battery_level" widget="progressbar"/>
                 <field name="last_seen"/>
             </tree>
@@ -18,17 +33,32 @@
         <field name="name">smart.parcel.form</field>
         <field name="model">smart.parcel</field>
         <field name="arch" type="xml">
-            <form string="Paczka BLE">
+            <form string="Paczka PUDO BLE">
                 <header>
+                    <button name="action_open_simulate_wizard"
+                            string="Symuluj nową paczkę (InPost -> Do odbioru)"
+                            type="object"
+                            class="btn-primary"/>
+                    <button name="action_open_client_pass"
+                            string="Pokaż kartę QR + PIN klienta"
+                            type="object"
+                            class="btn-secondary"/>
                     <field name="status" widget="statusbar" options="{'clickable': '1'}"/>
                 </header>
                 <sheet>
                     <group>
-                        <group string="Identyfikacja paczki i tagu">
-                            <field name="package_code" placeholder="np. PKG-2026-001"/>
-                            <field name="mac_address" placeholder="np. AA:BB:CC:DD:EE:FF"/>
+                        <group string="Dane przesyłki InPost">
+                            <field name="direction"/>
+                            <field name="package_code"/>
+                            <field name="parcel_size"/>
+                            <field name="inpost_pudo_status"/>
+                            <field name="inpost_api_status"/>
+                            <field name="inpost_shipment_id"/>
                         </group>
-                        <group string="Telemetria BLE">
+                        <group string="Odbiór i lokalizator BLE">
+                            <field name="recipient_phone"/>
+                            <field name="pickup_code"/>
+                            <field name="mac_address"/>
                             <field name="battery_level" widget="progressbar"/>
                             <field name="last_seen"/>
                         </group>
@@ -38,12 +68,42 @@
         </field>
     </record>
 
+    <record id="view_smart_parcel_simulate_wizard_form" model="ir.ui.view">
+        <field name="name">smart.parcel.simulate.wizard.form</field>
+        <field name="model">smart.parcel.simulate.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Symulacja: Nadanie w InPost -> Gotowa do odbioru">
+                <group>
+                    <field name="recipient_phone" placeholder="np. 500600700"/>
+                    <field name="size_template"/>
+                    <field name="target_point"/>
+                    <field name="mac_address" placeholder="np. AA:BB:CC:DD:EE:FF (zostaw puste, jeśli dodasz telefonem)"/>
+                </group>
+                <footer>
+                    <button name="action_run_simulation"
+                            string="Utwórz w InPost Sandbox i ustaw 'Do odbioru'"
+                            type="object"
+                            class="btn-primary"/>
+                    <button string="Anuluj" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
     <record id="action_smart_parcel" model="ir.actions.act_window">
-        <field name="name">Paczki BLE</field>
+        <field name="name">Paczki PUDO (InPost + BLE)</field>
         <field name="res_model">smart.parcel</field>
         <field name="view_mode">tree,form</field>
     </record>
 
+    <record id="action_smart_parcel_simulate_wizard" model="ir.actions.act_window">
+        <field name="name">Symuluj nadanie (Do odbioru)</field>
+        <field name="res_model">smart.parcel.simulate.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
     <menuitem id="menu_smart_parcel_root" name="Lokalizator BLE" sequence="1"/>
-    <menuitem id="menu_smart_parcel_list" name="Paczki w magazynie" parent="menu_smart_parcel_root" action="action_smart_parcel" sequence="1"/>
+    <menuitem id="menu_smart_parcel_list" name="Paczki w punkcie PUDO" parent="menu_smart_parcel_root" action="action_smart_parcel" sequence="1"/>
+    <menuitem id="menu_smart_parcel_simulate" name="Symuluj nadanie (Do odbioru)" parent="menu_smart_parcel_root" action="action_smart_parcel_simulate_wizard" sequence="2"/>
 </odoo>
