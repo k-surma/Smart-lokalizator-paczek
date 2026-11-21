@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -9,6 +9,44 @@ import 'package:permission_handler/permission_handler.dart';
 const String apiBaseUrl = "http://63.187.131.29:8000";
 const String gattServiceUuid = "19b10000-e8f2-537e-4f6c-d104768a1214";
 const String gattBuzzerCharUuid = "19b10001-e8f2-537e-4f6c-d104768a1214";
+
+/// Normalizuje adres MAC w dowolnym formacie (AABBCCDDEEFF, aa:bb:..., aa-bb-..., JSON)
+/// do kanonicznego formatu AA:BB:CC:DD:EE:FF. Zwraca null, jeśli format jest błędny.
+String? normalizeMacAddress(String raw) {
+  var cleaned = raw.trim();
+  if (cleaned.isEmpty) return null;
+
+  if (cleaned.startsWith('{')) {
+    try {
+      final decoded = jsonDecode(cleaned);
+      if (decoded is Map) {
+        for (final key in ['mac_address', 'mac', 'address']) {
+          final val = decoded[key]?.toString().trim();
+          if (val != null && val.isNotEmpty) {
+            cleaned = val;
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  String? hexOnly;
+  final sepMatch = RegExp(r'([0-9A-Fa-f]{2}(?:[:\-\s][0-9A-Fa-f]{2}){5})')
+      .firstMatch(cleaned);
+  if (sepMatch != null) {
+    hexOnly = sepMatch.group(1)!.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+  } else {
+    final plainMatch = RegExp(r'(?<![0-9A-Fa-f])([0-9A-Fa-f]{12})(?![0-9A-Fa-f])')
+        .firstMatch(cleaned);
+    if (plainMatch != null) {
+      hexOnly = plainMatch.group(1)!.toUpperCase();
+    }
+  }
+
+  if (hexOnly == null || hexOnly.length != 12) return null;
+  return List.generate(6, (i) => hexOnly!.substring(i * 2, i * 2 + 2)).join(':');
+}
 
 void main() {
   runApp(const SmartLocatorApp());
@@ -33,7 +71,12 @@ class SmartLocatorApp extends StatelessWidget {
 
 class QrScannerPage extends StatefulWidget {
   final String title;
-  const QrScannerPage({super.key, required this.title});
+  final bool allowManualInput;
+  const QrScannerPage({
+    super.key,
+    required this.title,
+    this.allowManualInput = true,
+  });
 
   @override
   State<QrScannerPage> createState() => _QrScannerPageState();
@@ -42,10 +85,49 @@ class QrScannerPage extends StatefulWidget {
 class _QrScannerPageState extends State<QrScannerPage> {
   bool _scanned = false;
 
+  Future<void> _openManualDialog() async {
+    _scanned = true;
+    final ctrl = TextEditingController();
+    final manual = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Wpisz kod ręcznie"),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: "Numer przesyłki lub kod QR"),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Anuluj")),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text("Zatwierdź"),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (manual != null && manual.isNotEmpty) {
+      Navigator.of(context).pop(manual);
+    } else {
+      _scanned = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: [
+          if (widget.allowManualInput)
+            IconButton(
+              icon: const Icon(Icons.keyboard),
+              tooltip: "Wpisz ręcznie",
+              onPressed: _openManualDialog,
+            ),
+        ],
+      ),
       body: MobileScanner(
         onDetect: (BarcodeCapture capture) {
           if (_scanned) return;
@@ -115,9 +197,11 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<String?> _scanCode(String title) async {
+  Future<String?> _scanCode(String title, {bool allowManualInput = true}) async {
     return Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => QrScannerPage(title: title)),
+      MaterialPageRoute(
+        builder: (_) => QrScannerPage(title: title, allowManualInput: allowManualInput),
+      ),
     );
   }
 
@@ -140,8 +224,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 labelText: "Kod paczki / ID InPost",
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.qr_code_scanner),
+                  tooltip: "Skanuj etykietę paczki",
                   onPressed: () async {
-                    final scanned = await _scanCode("Skanuj etykietę InPost");
+                    final scanned = await _scanCode(
+                      "Skanuj etykietę InPost",
+                      allowManualInput: false,
+                    );
                     if (scanned != null) codeCtrl.text = scanned;
                   },
                 ),
@@ -151,9 +239,29 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               controller: macCtrl,
               textCapitalization: TextCapitalization.characters,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: "Adres MAC lokalizatora XIAO",
-                hintText: "np. AA:BB:CC:DD:EE:FF",
+                hintText: "AABBCCDDEEFF lub AA:BB:CC:DD:EE:FF",
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  tooltip: "Skanuj QR lokalizatora",
+                  onPressed: () async {
+                    final scanned = await _scanCode(
+                      "Skanuj QR lokalizatora (MAC)",
+                      allowManualInput: false,
+                    );
+                    if (scanned != null) {
+                      final normalized = normalizeMacAddress(scanned);
+                      if (normalized != null) {
+                        macCtrl.text = normalized;
+                      } else {
+                        macCtrl.text = scanned;
+                        _showSnack("Zeskanowany QR nie zawiera poprawnego 12-znakowego MAC",
+                            isError: true);
+                      }
+                    }
+                  },
+                ),
               ),
             ),
           ],
@@ -163,13 +271,20 @@ class _HomeScreenState extends State<HomeScreen> {
           FilledButton(
             onPressed: () async {
               final code = codeCtrl.text.trim();
-              final mac = macCtrl.text.trim().toUpperCase();
-              if (code.isEmpty || mac.isEmpty) {
-                _showSnack("Wpisz kod paczki i adres MAC", isError: true);
+              final normalizedMac = normalizeMacAddress(macCtrl.text);
+              if (code.isEmpty) {
+                _showSnack("Zeskanuj lub wpisz kod paczki", isError: true);
+                return;
+              }
+              if (normalizedMac == null) {
+                _showSnack(
+                  "Nieprawidłowy MAC (wpisz 12 znaków hex, np. AABBCCDDEEFF)",
+                  isError: true,
+                );
                 return;
               }
               Navigator.pop(ctx);
-              await _submitAccept(code: code, mac: mac, isOutbound: isOutbound);
+              await _submitAccept(code: code, mac: normalizedMac, isOutbound: isOutbound);
             },
             child: const Text("Sprawdź w InPost i połącz"),
           ),
@@ -195,11 +310,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (resp.statusCode == 200) {
         final data = jsonDecode(resp.body);
         await _fetchPackages();
-        if (!isOutbound && data["pickup_code"] != null) {
-          _showPickupCodeDialog(data);
-        } else {
-          _showSnack("Nadana w punkcie: ${data['package_code']} (MAC: $mac)");
-        }
+        final label = isOutbound ? "Nadana w punkcie" : "Przyjęta do odbioru";
+        _showSnack("$label: ${data['package_code']} (MAC: ${data['mac_address']})");
       } else {
         final err = jsonDecode(resp.body)["detail"] ?? resp.body;
         _showSnack("Błąd: $err", isError: true);
@@ -207,34 +319,6 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _showSnack("Błąd sieci: $e", isError: true);
     }
-  }
-
-  void _showPickupCodeDialog(Map<String, dynamic> pkg) {
-    final phone = (pkg["recipient_phone"] ?? "").toString();
-    final last4 = phone.length >= 4 ? phone.substring(phone.length - 4) : "brak";
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Status: Do odbioru w punkcie"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text("Numer: ${pkg['package_code']}"),
-            Text("Gabaryt: ${pkg['parcel_size'] ?? '-'}  |  MAC: ${pkg['mac_address']}"),
-            const Divider(),
-            Text("4 ostatnie cyfry tel.: $last4",
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-            Text("Kod odbioru (PIN): ${pkg['pickup_code']}",
-                style: const TextStyle(
-                    fontSize: 22, fontWeight: FontWeight.bold, color: Colors.indigo)),
-          ],
-        ),
-        actions: [
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
-        ],
-      ),
-    );
   }
 
   Future<void> _courierPickupFlow() async {
@@ -259,90 +343,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _showClientVerifyDialog() async {
-    final phone4Ctrl = TextEditingController();
-    final qrCtrl = TextEditingController();
-    final pinCtrl = TextEditingController();
-
-    await showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Wydaj paczkę klientowi"),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: phone4Ctrl,
-                keyboardType: TextInputType.number,
-                maxLength: 4,
-                decoration: const InputDecoration(
-                  labelText: "4 ostatnie cyfry telefonu klienta",
-                  hintText: "np. 0700",
-                ),
-              ),
-              const Text("— LUB —", style: TextStyle(color: Colors.grey)),
-              TextField(
-                controller: qrCtrl,
-                decoration: InputDecoration(
-                  labelText: "Kod QR klienta",
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    onPressed: () async {
-                      final scanned = await _scanCode("Skanuj QR klienta");
-                      if (scanned != null) qrCtrl.text = scanned;
-                    },
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: pinCtrl,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                decoration: const InputDecoration(
-                  labelText: "6-cyfrowy kod odbioru (PIN)",
-                  hintText: "np. 482910",
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Anuluj")),
-          FilledButton(
-            onPressed: () async {
-              final pin = pinCtrl.text.trim();
-              final last4 = phone4Ctrl.text.trim();
-              final qr = qrCtrl.text.trim();
-              if (pin.isEmpty || (last4.isEmpty && qr.isEmpty)) {
-                _showSnack("Podaj PIN oraz 4 cyfry tel. lub QR", isError: true);
-                return;
-              }
-              Navigator.pop(ctx);
-              await _verifyClientAndLocate(pin: pin, phoneLast4: last4, qrCode: qr);
-            },
-            child: const Text("Znajdź i lokalizuj"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _verifyClientAndLocate({
-    required String pin,
-    String? phoneLast4,
-    String? qrCode,
-  }) async {
+  Future<void> _clientPickupFlow() async {
+    final qr = await _scanCode("Skanuj QR klienta (Odbiór)");
+    if (qr == null) return;
     try {
       final resp = await http.post(
         Uri.parse("$apiBaseUrl/api/inpost/client-verify"),
         headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "pickup_code": pin,
-          "phone_last4": (phoneLast4 != null && phoneLast4.isNotEmpty) ? phoneLast4 : null,
-          "qr_code": (qrCode != null && qrCode.isNotEmpty) ? qrCode : null,
-        }),
+        body: jsonEncode({"code": qr}),
       );
       if (resp.statusCode == 200) {
         final pkg = jsonDecode(resp.body);
@@ -467,9 +475,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     Expanded(
                       child: FilledButton.icon(
                         style: FilledButton.styleFrom(backgroundColor: Colors.amber.shade800),
-                        icon: const Icon(Icons.person_pin_circle_outlined),
-                        label: const Text("Wydaj klientowi\n(PIN / QR)", textAlign: TextAlign.center),
-                        onPressed: _showClientVerifyDialog,
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text("Wydaj klientowi\n(QR)", textAlign: TextAlign.center),
+                        onPressed: _clientPickupFlow,
                       ),
                     ),
                   ],
@@ -491,7 +499,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         final status = p["status"] ?? "IDLE";
                         final isDelivered = status == "DELIVERED";
                         final mac = p["mac_address"];
-                        final pin = p["pickup_code"];
                         final size = p["parcel_size"] ?? "-";
                         final pudoLabel = _formatPudoStatus(p["inpost_pudo_status"]);
 
@@ -510,9 +517,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text("Gabaryt: $size  |  MAC: ${mac ?? 'zwolniony'}"),
-                                if (pin != null)
-                                  Text("PIN: $pin  |  Tel: ${p['recipient_phone'] ?? '-'}",
-                                      style: const TextStyle(fontWeight: FontWeight.w600)),
                                 Text("InPost PUDO: $pudoLabel  ($status)",
                                     style: TextStyle(
                                         color: isDelivered ? Colors.grey : Colors.deepOrange,
@@ -566,7 +570,10 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   bool _triggered = false;
   StreamSubscription<List<ScanResult>>? _scanSub;
 
-  String get _targetMac => (widget.pkg["mac_address"] ?? "").toString().toUpperCase();
+  String get _targetMac {
+    final raw = (widget.pkg["mac_address"] ?? "").toString();
+    return normalizeMacAddress(raw) ?? raw.toUpperCase();
+  }
 
   @override
   void initState() {
@@ -613,7 +620,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
 
   Future<void> _triggerGattBuzzer(BluetoothDevice device) async {
     try {
-      await device.connect(timeout: const Duration(seconds: 5));
+      await device.connect(license: License.free, timeout: const Duration(seconds: 5));
       final services = await device.discoverServices();
       for (final s in services) {
         if (s.uuid.toString().toLowerCase() == gattServiceUuid) {

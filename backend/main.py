@@ -49,11 +49,11 @@ class Package(Base):
 
     # Integracja InPost ShipX Sandbox + Maszyna stanów PUDO
     inpost_shipment_id = Column(Integer, nullable=True)
-    inpost_api_status = Column(String, nullable=True)              # Surowy status z API InPost
+    inpost_api_status = Column(String, nullable=True)
     inpost_pudo_status = Column(String, default="confirmed")       # confirmed | dispatched_by_sender | ready_to_pickup | collected_from_sender | delivered
     parcel_size = Column(String, nullable=True)                    # A | B | C
     recipient_phone = Column(String, nullable=True)
-    pickup_code = Column(String, nullable=True)                    # 6-cyfrowy kod odbioru
+    pickup_code = Column(String, nullable=True)
 
 
 # ==============================================================================
@@ -79,9 +79,10 @@ class CourierPickupRequest(BaseModel):
 
 
 class ClientVerifyRequest(BaseModel):
-    pickup_code: str
-    phone_last4: Optional[str] = None
+    code: Optional[str] = None
     qr_code: Optional[str] = None
+    pickup_code: Optional[str] = None
+    phone_last4: Optional[str] = None
 
 
 class SimulateInboundRequest(BaseModel):
@@ -150,8 +151,42 @@ async def get_db():
 
 
 # ==============================================================================
-# 4. FUNKCJE POMOCNICZE INPOST SHIPX SANDBOX
+# 4. FUNKCJE POMOCNICZE (NORMALIZACJA MAC + INPOST SHIPX SANDBOX)
 # ==============================================================================
+def normalize_mac(raw_mac: Optional[str]) -> Optional[str]:
+    """
+    Akceptuje adres MAC bez dwukropków (aabbccddeeff), z dwukropkami/myślnikami/spacjami
+    oraz z kodu QR w formacie JSON ({"mac": "..."}). Zwraca kanoniczny AA:BB:CC:DD:EE:FF.
+    """
+    if raw_mac is None or not raw_mac.strip():
+        return None
+    cleaned = raw_mac.strip()
+
+    if cleaned.startswith("{"):
+        try:
+            parsed = json.loads(cleaned)
+            for key in ("mac_address", "mac", "address"):
+                if parsed.get(key):
+                    cleaned = str(parsed[key]).strip()
+                    break
+        except json.JSONDecodeError:
+            pass
+
+    sep_match = re.search(r"([0-9A-Fa-f]{2}(?:[:\-\s][0-9A-Fa-f]{2}){5})", cleaned)
+    if sep_match:
+        hex_only = re.sub(r"[^0-9A-Fa-f]", "", sep_match.group(1)).upper()
+    else:
+        plain_match = re.search(r"(?<![0-9A-Fa-f])([0-9A-Fa-f]{12})(?![0-9A-Fa-f])", cleaned)
+        if not plain_match:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nieprawidłowy adres MAC: '{raw_mac}'. Podaj 12 znaków hex (np. AABBCCDDEEFF lub AA:BB:CC:DD:EE:FF).",
+            )
+        hex_only = plain_match.group(1).upper()
+
+    return ":".join(hex_only[i:i + 2] for i in range(0, 12, 2))
+
+
 def extract_tracking_code(raw_input: str) -> str:
     cleaned = raw_input.strip()
     if cleaned.startswith("{"):
@@ -162,7 +197,7 @@ def extract_tracking_code(raw_input: str) -> str:
                     return str(parsed[key]).strip()
         except json.JSONDecodeError:
             pass
-    match_24 = re.search(r"\b(\d{24})\b", cleaned)
+    match_24 = re.search(r"(?<!\d)(\d{24})(?!\d)", cleaned)
     if match_24:
         return match_24.group(1)
     if "number=" in cleaned:
@@ -313,7 +348,7 @@ async def bind_package_with_tag(
     direction: str,
     pudo_status: str,
 ) -> Package:
-    clean_mac = mac_address.strip().upper() if mac_address and mac_address.strip() else None
+    clean_mac = normalize_mac(mac_address)
     tracking = str(inpost_data.get("tracking_number") or inpost_data.get("id"))
     shipment_id = inpost_data.get("id")
     api_status = inpost_data.get("status", "confirmed")
@@ -326,7 +361,6 @@ async def bind_package_with_tag(
 
     pkg_res = await db.execute(select(Package).where(Package.package_code == tracking))
     pkg = pkg_res.scalars().first()
-    generated_pin = f"{random.randint(100000, 999999)}" if direction == "INBOUND" else None
 
     if pkg:
         pkg.mac_address = clean_mac if clean_mac is not None else pkg.mac_address
@@ -338,8 +372,6 @@ async def bind_package_with_tag(
         pkg.inpost_pudo_status = pudo_status
         pkg.parcel_size = parcel_size
         pkg.recipient_phone = phone or pkg.recipient_phone
-        if direction == "INBOUND" and not pkg.pickup_code:
-            pkg.pickup_code = generated_pin
     else:
         pkg = Package(
             mac_address=clean_mac,
@@ -353,7 +385,7 @@ async def bind_package_with_tag(
             inpost_pudo_status=pudo_status,
             parcel_size=parcel_size,
             recipient_phone=phone,
-            pickup_code=generated_pin,
+            pickup_code=None,
         )
         db.add(pkg)
 
@@ -371,12 +403,12 @@ async def bind_package_with_tag(
 # ==============================================================================
 @app.post("/api/inpost/accept-outbound", response_model=PackageResponse)
 async def accept_outbound_parcel(req: InpostAcceptRequest, db: AsyncSession = Depends(get_db)):
-    if not req.mac_address.strip():
-        raise HTTPException(status_code=400, detail="Wpisz adres MAC lokalizatora.")
+    clean_mac = normalize_mac(req.mac_address)
+    if not clean_mac:
+        raise HTTPException(status_code=400, detail="Wpisz lub zeskanuj adres MAC lokalizatora.")
     inpost_data = await fetch_shipment_from_inpost(req.code)
-    # Po nadaniu w punkcie status PUDO zmienia się na 'dispatched_by_sender' (Nadana w punkcie)
     pkg = await bind_package_with_tag(
-        db, inpost_data, req.mac_address, direction="OUTBOUND", pudo_status="dispatched_by_sender"
+        db, inpost_data, clean_mac, direction="OUTBOUND", pudo_status="dispatched_by_sender"
     )
     sync_msg = await sync_event_with_inpost(pkg, "PUDO_DISPATCHED_BY_SENDER")
     await db.commit()
@@ -414,16 +446,16 @@ async def courier_pickup_locate(req: CourierPickupRequest, db: AsyncSession = De
 
 
 # ==============================================================================
-# 6. PROCES 2: ODBIÓR OD KURIERA I WYDANIE KLIENTOWI (INBOUND)
+# 6. PROCES 2: ODBIÓR OD KURIERA I WYDANIE KLIENTOWI (INBOUND - TYLKO SKANER QR)
 # ==============================================================================
 @app.post("/api/inpost/accept-inbound", response_model=PackageResponse)
 async def accept_inbound_parcel(req: InpostAcceptRequest, db: AsyncSession = Depends(get_db)):
-    if not req.mac_address.strip():
-        raise HTTPException(status_code=400, detail="Wpisz adres MAC lokalizatora.")
+    clean_mac = normalize_mac(req.mac_address)
+    if not clean_mac:
+        raise HTTPException(status_code=400, detail="Wpisz lub zeskanuj adres MAC lokalizatora.")
     inpost_data = await fetch_shipment_from_inpost(req.code)
-    # Po przyjęciu od kuriera status PUDO przechodzi na 'ready_to_pickup' (Do odbioru w punkcie)
     pkg = await bind_package_with_tag(
-        db, inpost_data, req.mac_address, direction="INBOUND", pudo_status="ready_to_pickup"
+        db, inpost_data, clean_mac, direction="INBOUND", pudo_status="ready_to_pickup"
     )
     sync_msg = await sync_event_with_inpost(pkg, "PUDO_READY_TO_PICKUP")
     await db.commit()
@@ -435,37 +467,26 @@ async def accept_inbound_parcel(req: InpostAcceptRequest, db: AsyncSession = Dep
 
 @app.post("/api/inpost/client-verify", response_model=PackageResponse)
 async def verify_client_pickup(req: ClientVerifyRequest, db: AsyncSession = Depends(get_db)):
-    pin = req.pickup_code.strip()
-    if not pin:
-        raise HTTPException(status_code=400, detail="Podaj 6-cyfrowy kod odbioru.")
+    raw_code = (req.code or req.qr_code or "").strip()
+    if not raw_code:
+        raise HTTPException(status_code=400, detail="Zeskanuj kod QR lub podaj numer przesyłki.")
 
-    query = select(Package).where(
-        Package.direction == "INBOUND",
-        Package.pickup_code == pin,
-        Package.status != "DELIVERED",
+    scanned = extract_tracking_code(raw_code)
+    result = await db.execute(
+        select(Package).where(
+            or_(
+                Package.package_code == scanned,
+                Package.inpost_shipment_id == (int(scanned) if scanned.isdigit() and len(scanned) < 15 else -1),
+            ),
+            Package.direction == "INBOUND",
+        )
     )
-    candidates = (await db.execute(query)).scalars().all()
-    matched: Optional[Package] = None
-
-    if req.qr_code and req.qr_code.strip():
-        scanned = extract_tracking_code(req.qr_code)
-        for p in candidates:
-            if p.package_code == scanned or str(p.inpost_shipment_id or "") == scanned:
-                matched = p
-                break
-    elif req.phone_last4 and req.phone_last4.strip():
-        last4 = normalize_phone(req.phone_last4)[-4:]
-        if len(last4) != 4:
-            raise HTTPException(status_code=400, detail="Podaj dokładnie 4 ostatnie cyfry telefonu.")
-        for p in candidates:
-            if normalize_phone(p.recipient_phone).endswith(last4):
-                matched = p
-                break
-    else:
-        raise HTTPException(status_code=400, detail="Podaj 4 ostatnie cyfry telefonu lub zeskanuj QR.")
+    matched = result.scalars().first()
 
     if not matched:
-        raise HTTPException(status_code=403, detail="Nie znaleziono paczki dla podanego PIN i telefonu / QR.")
+        raise HTTPException(status_code=404, detail=f"Brak w magazynie paczki do odbioru dla kodu: {scanned}")
+    if matched.status == "DELIVERED":
+        raise HTTPException(status_code=400, detail="Ta paczka została już wydana klientowi.")
     if not matched.mac_address:
         raise HTTPException(status_code=400, detail="Paczka nie ma przypiętego lokalizatora BLE.")
 
@@ -481,209 +502,11 @@ async def verify_client_pickup(req: ClientVerifyRequest, db: AsyncSession = Depe
 # ==============================================================================
 @app.post("/api/inpost/simulate-ready-for-pickup", response_model=PackageResponse)
 async def simulate_ready_for_pickup(req: SimulateInboundRequest, db: AsyncSession = Depends(get_db)):
-    """
-    Tworzy prawdziwą przesyłkę w InPost ShipX Sandbox, czeka na nadanie numeru
-    śledzenia (polling), przeprowadza ją przez stan 'Nadana' -> 'Do odbioru',
-    generuje 6-cyfrowy kod odbioru i zapisuje w bazie Odoo.
-    """
     require_inpost_config()
+    clean_mac = normalize_mac(req.mac_address)
     headers = {"Authorization": f"Bearer {INPOST_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "receiver": {
             "first_name": "Jan",
             "last_name": "Kowalski",
             "email": req.recipient_email,
-            "phone": normalize_phone(req.recipient_phone) or "500600700",
-        },
-        "parcels": [{"template": req.size_template}],
-        "custom_attributes": {
-            "sending_method": "parcel_locker",
-            "target_point": req.target_point.strip().upper() or "KRA01M",
-        },
-        "service": "inpost_locker_standard",
-        "reference": f"PUDO-SIM-{random.randint(10000, 99999)}",
-    }
-
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        create_resp = await client.post(
-            f"{INPOST_SANDBOX_URL}/organizations/{INPOST_ORG_ID}/shipments",
-            headers=headers,
-            json=payload,
-        )
-        if create_resp.status_code not in (200, 201):
-            raise HTTPException(
-                status_code=create_resp.status_code,
-                detail=f"InPost Sandbox odrzucił utworzenie paczki: {create_resp.text}"
-            )
-        shipment_data = create_resp.json()
-        shipment_id = shipment_data.get("id")
-
-        # Czekamy chwilę aż InPost Sandbox opłaci z wirtualnego salda i nada 24-cyfrowy numer
-        if shipment_id and not shipment_data.get("tracking_number"):
-            for _ in range(6):
-                await asyncio.sleep(1.5)
-                poll_resp = await client.get(
-                    f"{INPOST_SANDBOX_URL}/shipments/{shipment_id}",
-                    headers=headers,
-                )
-                if poll_resp.status_code == 200:
-                    shipment_data = poll_resp.json()
-                    if shipment_data.get("tracking_number"):
-                        break
-
-    pkg = await bind_package_with_tag(
-        db=db,
-        inpost_data=shipment_data,
-        mac_address=req.mac_address,
-        direction="INBOUND",
-        pudo_status="ready_to_pickup",
-    )
-    sync_msg = await sync_event_with_inpost(pkg, "SIMULATED_DISPATCHED_TO_READY_TO_PICKUP")
-    await db.commit()
-    await db.refresh(pkg)
-    resp = PackageResponse.model_validate(pkg)
-    resp.inpost_sync_info = sync_msg
-    return resp
-
-
-# ==============================================================================
-# 8. WYDANIE PACZKI + KARTA QR/PIN KLIENTA + STANDARDOWE ENDPOINTY BLE
-# ==============================================================================
-@app.post("/api/packages/{package_id}/deliver", response_model=PackageResponse)
-async def deliver_package(package_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Package).where(Package.id == package_id))
-    pkg = result.scalars().first()
-    if not pkg:
-        raise HTTPException(status_code=404, detail="Nie znaleziono paczki.")
-
-    pkg.status = "DELIVERED"
-    pkg.inpost_pudo_status = (
-        "collected_from_sender" if pkg.direction == "OUTBOUND" else "delivered"
-    )
-    pkg.mac_address = None
-    pkg.last_seen = datetime.utcnow()
-
-    sync_info = await sync_event_with_inpost(
-        pkg,
-        "PUDO_COLLECTED_BY_COURIER" if pkg.direction == "OUTBOUND" else "PUDO_DELIVERED_TO_CLIENT",
-    )
-    await db.commit()
-    await db.refresh(pkg)
-    resp = PackageResponse.model_validate(pkg)
-    resp.inpost_sync_info = sync_info
-    return resp
-
-
-@app.get("/api/inpost/client-pass/{package_code}", response_class=HTMLResponse)
-async def get_client_pass_html(package_code: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Package).where(Package.package_code == package_code))
-    pkg = result.scalars().first()
-    if not pkg:
-        raise HTTPException(status_code=404, detail="Nie znaleziono paczki.")
-    last4 = normalize_phone(pkg.recipient_phone)[-4:] if pkg.recipient_phone else "brak"
-    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=240x240&data={pkg.package_code}"
-    return f"""
-    <!DOCTYPE html>
-    <html lang="pl">
-    <head>
-      <meta charset="utf-8"/>
-      <title>Przepustka QR - {pkg.package_code}</title>
-      <style>
-        body {{ font-family: Arial, sans-serif; text-align: center; background: #f5f5f5; padding: 30px; }}
-        .card {{ background: #fff; max-width: 420px; margin: auto; padding: 24px; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.12); }}
-        .badge {{ display: inline-block; padding: 6px 12px; border-radius: 20px; background: #ffcc00; font-weight: bold; }}
-        .pin {{ font-size: 32px; letter-spacing: 6px; font-weight: bold; color: #111; margin: 12px 0; }}
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <div class="badge">InPost PUDO • {pkg.direction} • Gabaryt {pkg.parcel_size or '-'}</div>
-        <h2>Przesyłka InPost</h2>
-        <p style="font-family: monospace; font-size: 14px;">{pkg.package_code}</p>
-        <img src="{qr_url}" alt="QR paczki"/>
-        <hr/>
-        <p><strong>4 ostatnie cyfry telefonu:</strong> {last4}</p>
-        <p><strong>Kod odbioru (PIN):</strong></p>
-        <div class="pin">{pkg.pickup_code or 'ND (Nadanie)'}</div>
-        <p style="color:#555; font-size:12px;">
-          Status PUDO: {pkg.inpost_pudo_status} | InPost API: {pkg.inpost_api_status or '-'} | MAC: {pkg.mac_address or 'Brak'}
-        </p>
-      </div>
-    </body>
-    </html>
-    """
-
-
-@app.get("/api/packages", response_model=List[PackageResponse])
-async def get_packages(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Package).order_by(Package.id.desc()))
-    return result.scalars().all()
-
-
-@app.post("/api/packages/register", response_model=PackageResponse)
-async def register_package(req: PackageRegisterRequest, db: AsyncSession = Depends(get_db)):
-    clean_mac = req.mac_address.strip().upper()
-    clean_code = req.package_code.strip()
-    if not clean_mac or not clean_code:
-        raise HTTPException(status_code=400, detail="Kod paczki i adres MAC nie mogą być puste")
-
-    result = await db.execute(
-        select(Package).where(or_(Package.mac_address == clean_mac, Package.package_code == clean_code))
-    )
-    existing = result.scalars().first()
-    if existing:
-        existing.mac_address = clean_mac
-        existing.package_code = clean_code
-        existing.status = "IDLE"
-        existing.last_seen = datetime.utcnow()
-        await db.commit()
-        await db.refresh(existing)
-        return existing
-
-    new_pkg = Package(
-        mac_address=clean_mac,
-        package_code=clean_code,
-        direction="INBOUND",
-        status="IDLE",
-        inpost_pudo_status="ready_to_pickup",
-        battery_level=100,
-        last_seen=datetime.utcnow(),
-    )
-    db.add(new_pkg)
-    await db.commit()
-    await db.refresh(new_pkg)
-    return new_pkg
-
-
-@app.post("/api/locate/{mac_address}", response_model=PackageResponse)
-async def trigger_locate(mac_address: str, db: AsyncSession = Depends(get_db)):
-    clean_mac = mac_address.strip().upper()
-    result = await db.execute(select(Package).where(Package.mac_address == clean_mac))
-    pkg = result.scalars().first()
-    if not pkg:
-        raise HTTPException(status_code=404, detail="Nie znaleziono paczki o podanym MAC")
-    pkg.status = "LOCATING"
-    pkg.last_seen = datetime.utcnow()
-    await db.commit()
-    await db.refresh(pkg)
-    return pkg
-
-
-@app.patch("/api/packages/{mac_address}/status", response_model=PackageResponse)
-async def update_package_status(
-    mac_address: str,
-    req: PackageStatusUpdateRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    clean_mac = mac_address.strip().upper()
-    result = await db.execute(select(Package).where(Package.mac_address == clean_mac))
-    pkg = result.scalars().first()
-    if not pkg:
-        raise HTTPException(status_code=404, detail="Nie znaleziono paczki o podanym MAC")
-    pkg.status = req.status
-    if req.battery_level is not None:
-        pkg.battery_level = req.battery_level
-    pkg.last_seen = datetime.utcnow()
-    await db.commit()
-    await db.refresh(pkg)
-    return pkg
