@@ -701,3 +701,157 @@ async def update_package_status(
     await db.commit()
     await db.refresh(pkg)
     return pkg
+
+
+# ==============================================================================
+# 9. ZLECENIA ODBIORU DLA KURIERA (INPOST SHIPX DISPATCH ORDERS)
+# ==============================================================================
+class CreateOutboundShipmentRequest(BaseModel):
+    recipient_phone: str = "500600700"
+    recipient_email: str = "odbiorca@zabka-pudo.pl"
+    size_template: str = "small"           # small | medium | large
+    target_point: str = "KRA01M"
+
+
+class DispatchOrderRequest(BaseModel):
+    package_ids: Optional[List[int]] = None
+    comment: str = "Odbior paczek nadawczych z punktu PUDO Smart Lokalizator"
+    name: str = "Punkt PUDO Smart Lokalizator"
+    phone: str = "500600700"
+    email: str = "pudo@smart-lokalizator.pl"
+    street: str = "Czarnowiejska"
+    building_number: str = "36"
+    city: str = "Krakow"
+    post_code: str = "30-054"
+
+
+@app.post("/api/inpost/create-outbound-shipment")
+async def create_outbound_shipment_for_dispatch(req: CreateOutboundShipmentRequest):
+    """
+    Tworzy w InPost Sandbox przesylke z sending_method='dispatch_order',
+    ktora mozna zeskanowac jako Nadanie w aplikacji, a nastepnie wpiac w Zlecenie Odbioru.
+    """
+    require_inpost_config()
+    headers = {"Authorization": f"Bearer {INPOST_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "receiver": {
+            "first_name": "Anna",
+            "last_name": "Nowak",
+            "email": req.recipient_email,
+            "phone": normalize_phone(req.recipient_phone) or "500600700",
+        },
+        "parcels": [{"template": req.size_template}],
+        "custom_attributes": {
+            "sending_method": "dispatch_order",
+            "target_point": req.target_point.strip().upper() or "KRA01M",
+        },
+        "service": "inpost_locker_standard",
+        "reference": f"PUDO-OUT-{random.randint(10000, 99999)}",
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        create_resp = await client.post(
+            f"{INPOST_SANDBOX_URL}/organizations/{INPOST_ORG_ID}/shipments",
+            headers=headers,
+            json=payload,
+        )
+        if create_resp.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=create_resp.status_code,
+                detail=f"InPost Sandbox odrzucil utworzenie przesylki: {create_resp.text}",
+            )
+        shipment_data = create_resp.json()
+        shipment_id = shipment_data.get("id")
+
+        if shipment_id and not shipment_data.get("tracking_number"):
+            for _ in range(6):
+                await asyncio.sleep(1.5)
+                poll_resp = await client.get(
+                    f"{INPOST_SANDBOX_URL}/shipments/{shipment_id}",
+                    headers=headers,
+                )
+                if poll_resp.status_code == 200:
+                    shipment_data = poll_resp.json()
+                    if shipment_data.get("tracking_number"):
+                        break
+
+    tracking = shipment_data.get("tracking_number")
+    return {
+        "inpost_shipment_id": shipment_id,
+        "tracking_number": tracking,
+        "status": shipment_data.get("status"),
+        "qr_image_url": f"https://api.qrserver.com/v1/create-qr-code/?size=240x240&data={tracking}" if tracking else None,
+    }
+
+
+@app.post("/api/inpost/dispatch-orders")
+async def create_inpost_dispatch_order(
+    req: DispatchOrderRequest = DispatchOrderRequest(),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Wysyla do InPost ShipX Sandbox zlecenie odbioru kuriera (POST /v1/organizations/{id}/dispatch_orders)
+    dla oczekujacych paczek nadawczych (OUTBOUND) posiadajacych inpost_shipment_id.
+    """
+    require_inpost_config()
+
+    query = select(Package).where(
+        Package.direction == "OUTBOUND",
+        Package.status != "DELIVERED",
+        Package.inpost_shipment_id.is_not(None),
+    )
+    if req.package_ids:
+        query = query.where(Package.id.in_(req.package_ids))
+
+    packages = (await db.execute(query)).scalars().all()
+    if not packages:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Brak oczekujacych paczek nadawczych (OUTBOUND) z ID z InPost ShipX API. "
+                "Utworz paczke przez /api/inpost/create-outbound-shipment i przyjmij ja w aplikacji jako Nadanie."
+            ),
+        )
+
+    shipment_ids = [pkg.inpost_shipment_id for pkg in packages]
+    payload = {
+        "shipments": shipment_ids,
+        "comment": req.comment,
+        "name": req.name,
+        "phone": normalize_phone(req.phone) or "500600700",
+        "email": req.email,
+        "address": {
+            "street": req.street,
+            "building_number": req.building_number,
+            "city": req.city,
+            "post_code": req.post_code,
+            "country_code": "PL",
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {INPOST_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{INPOST_SANDBOX_URL}/organizations/{INPOST_ORG_ID}/dispatch_orders",
+            headers=headers,
+            json=payload,
+        )
+
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"InPost Sandbox odrzucil zlecenie odbioru: {resp.text}",
+        )
+
+    data = resp.json()
+    return {
+        "dispatch_order_id": data.get("id"),
+        "status": data.get("status"),
+        "shipments_count": len(shipment_ids),
+        "shipment_ids": shipment_ids,
+        "package_codes": [pkg.package_code for pkg in packages],
+        "message": f"Utworzono Zlecenie Odbioru #{data.get('id')} w InPost Sandbox ({len(shipment_ids)} paczek).",
+    }
