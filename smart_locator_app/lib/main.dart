@@ -365,65 +365,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _requestCourierDispatchOrder() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Zamów kuriera InPost"),
-        content: const Text(
-          "Wysłać Zlecenie Odbioru (Dispatch Order) do InPost Sandbox dla wszystkich oczekujących paczek nadawczych?",
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Anuluj")),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Zamów kuriera")),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
-    try {
-      final resp = await http.post(
-        Uri.parse("$apiBaseUrl/api/inpost/dispatch-orders"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({}),
-      );
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body);
-        if (!mounted) return;
-        await showDialog(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text("Zlecenie Odbioru utworzone"),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text("ID zlecenia InPost: #${data['dispatch_order_id']}",
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                const SizedBox(height: 6),
-                Text("Status w Sandbox: ${data['status']}"),
-                Text("Liczba paczek: ${data['shipments_count']}"),
-                const SizedBox(height: 8),
-                const Text(
-                  "Sprawdź zakładkę 'Zlecenia odbioru' w sandbox-manager.paczkomaty.pl.",
-                  style: TextStyle(color: Colors.black54, fontSize: 12),
-                ),
-              ],
-            ),
-            actions: [
-              FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK")),
-            ],
-          ),
-        );
-      } else {
-        final err = jsonDecode(resp.body)["detail"] ?? resp.body;
-        _showSnack("Błąd zlecenia: $err", isError: true);
-      }
-    } catch (e) {
-      _showSnack("Błąd sieci: $e", isError: true);
-    }
-  }
-
   Future<void> _markAsDelivered(int packageId) async {
     try {
       final resp = await http.post(Uri.parse("$apiBaseUrl/api/packages/$packageId/deliver"));
@@ -540,15 +481,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                   ],
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    icon: const Icon(Icons.airport_shuttle_outlined),
-                    label: const Text("Zamów kuriera po nadania (InPost)"),
-                    onPressed: _requestCourierDispatchOrder,
-                  ),
                 ),
               ],
             ),
