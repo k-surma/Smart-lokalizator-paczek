@@ -223,6 +223,14 @@ def require_inpost_config():
         )
 
 
+def _shipment_matches_code(item: Dict[str, Any], code: str) -> bool:
+    return (
+        str(item.get("tracking_number") or "").strip() == code
+        or str(item.get("id") or "").strip() == code
+        or str(item.get("reference") or "").strip() == code
+    )
+
+
 async def fetch_shipment_from_inpost(raw_code: str) -> Dict[str, Any]:
     require_inpost_config()
     code = extract_tracking_code(raw_code)
@@ -234,10 +242,15 @@ async def fetch_shipment_from_inpost(raw_code: str) -> Dict[str, Any]:
             headers=headers,
             params={"tracking_number": code},
         )
+        if resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=502,
+                detail="Błąd autoryzacji InPost Sandbox API (sprawdź INPOST_TOKEN i INPOST_ORG_ID)."
+            )
         if resp.status_code == 200:
-            items = resp.json().get("items") or []
-            if items:
-                return items[0]
+            for item in resp.json().get("items") or []:
+                if _shipment_matches_code(item, code):
+                    return item
 
         if code.isdigit() and len(code) < 15:
             resp_id = await client.get(
@@ -245,45 +258,29 @@ async def fetch_shipment_from_inpost(raw_code: str) -> Dict[str, Any]:
                 headers=headers,
             )
             if resp_id.status_code == 200:
-                return resp_id.json()
-
-        resp_ref = await client.get(
-            f"{INPOST_SANDBOX_URL}/organizations/{INPOST_ORG_ID}/shipments",
-            headers=headers,
-            params={"reference": code},
-        )
-        if resp_ref.status_code == 200:
-            items = resp_ref.json().get("items") or []
-            if items:
-                return items[0]
+                item = resp_id.json()
+                if _shipment_matches_code(item, code):
+                    return item
 
         resp_list = await client.get(
             f"{INPOST_SANDBOX_URL}/organizations/{INPOST_ORG_ID}/shipments",
             headers=headers,
-            params={"per_page": 50},
+            params={"per_page": 100},
         )
         if resp_list.status_code == 200:
             for item in resp_list.json().get("items") or []:
-                if (
-                    str(item.get("tracking_number") or "") == code
-                    or str(item.get("id") or "") == code
-                    or str(item.get("reference") or "") == code
-                ):
+                if _shipment_matches_code(item, code):
                     return item
 
-        if resp.status_code in (401, 403):
-            raise HTTPException(
-                status_code=502,
-                detail="Błąd autoryzacji InPost Sandbox API (sprawdź INPOST_TOKEN i INPOST_ORG_ID)."
-            )
-
-        # Fallback: endpoint /tracking/{code} znajduje też paczki wyklikane ręcznie w panelu WWW Sandbox
+        # Fallback: endpoint /tracking/{code} znajduje paczki wyklikane ręcznie w panelu WWW Sandbox
         resp_track = await client.get(
             f"{INPOST_SANDBOX_URL}/tracking/{code}",
             headers=headers,
         )
         if resp_track.status_code == 200:
-            return resp_track.json()
+            track_data = resp_track.json()
+            if str(track_data.get("tracking_number") or "").strip() == code:
+                return track_data
 
     raise HTTPException(
         status_code=404,
