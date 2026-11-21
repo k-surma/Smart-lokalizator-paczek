@@ -175,6 +175,9 @@ def map_inpost_size(shipment: Dict[str, Any]) -> str:
     if parcels:
         template = (parcels[0].get("template") or "").lower()
         return {"small": "A", "medium": "B", "large": "C"}.get(template, "B")
+    custom_size = (shipment.get("custom_attributes") or {}).get("size")
+    if custom_size:
+        return str(custom_size).upper()
     return "B"
 
 
@@ -245,6 +248,14 @@ async def fetch_shipment_from_inpost(raw_code: str) -> Dict[str, Any]:
                 status_code=502,
                 detail="Błąd autoryzacji InPost Sandbox API (sprawdź INPOST_TOKEN i INPOST_ORG_ID)."
             )
+
+        # Fallback: endpoint /tracking/{code} znajduje też paczki wyklikane ręcznie w panelu WWW Sandbox
+        resp_track = await client.get(
+            f"{INPOST_SANDBOX_URL}/tracking/{code}",
+            headers=headers,
+        )
+        if resp_track.status_code == 200:
+            return resp_track.json()
 
     raise HTTPException(
         status_code=404,
