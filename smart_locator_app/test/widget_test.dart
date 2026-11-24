@@ -78,12 +78,14 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Przyjmij NADANIE od klienta'), findsOneWidget);
-      expect(find.byIcon(Icons.qr_code_scanner), findsNWidgets(2));
+      expect(find.descendant(of: find.byType(AlertDialog), matching: find.byIcon(Icons.qr_code_scanner)), findsNWidgets(2));
 
       // Puste pola -> komunikat walidacji
       await tester.tap(find.text('Sprawdź w InPost i połącz'));
       await tester.pump();
       expect(find.text('Zeskanuj lub wpisz kod paczki'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.byType(Scaffold))).clearSnackBars();
+      await tester.pumpAndSettle();
 
       // Poprawny kod, ale bledny MAC -> komunikat walidacji MAC
       final fields = find.byType(TextField);
@@ -106,7 +108,7 @@ void main() {
 
       expect(find.text('Przyjmij paczkę OD KURIERA'), findsOneWidget);
       expect(find.text('Adres MAC lokalizatora XIAO'), findsOneWidget);
-      expect(find.byIcon(Icons.qr_code_scanner), findsNWidgets(2));
+      expect(find.descendant(of: find.byType(AlertDialog), matching: find.byIcon(Icons.qr_code_scanner)), findsNWidgets(2));
     });
   });
 }
