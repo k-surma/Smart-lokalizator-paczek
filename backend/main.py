@@ -698,3 +698,27 @@ async def update_package_status(
     await db.commit()
     await db.refresh(pkg)
     return pkg
+
+
+class BatteryUpdateRequest(BaseModel):
+    battery_level: int
+
+
+@app.patch("/api/packages/{mac_address}/battery", response_model=PackageResponse)
+async def update_package_battery(
+    mac_address: str,
+    req: BatteryUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    if not (0 <= req.battery_level <= 100):
+        raise HTTPException(status_code=400, detail="Poziom baterii musi być w zakresie 0-100.")
+    clean_mac = normalize_mac(mac_address)
+    result = await db.execute(select(Package).where(Package.mac_address == clean_mac))
+    pkg = result.scalars().first()
+    if not pkg:
+        raise HTTPException(status_code=404, detail="Nie znaleziono paczki o podanym MAC")
+    pkg.battery_level = req.battery_level
+    pkg.last_seen = datetime.utcnow()
+    await db.commit()
+    await db.refresh(pkg)
+    return pkg

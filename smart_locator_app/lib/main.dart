@@ -9,6 +9,9 @@ import 'package:permission_handler/permission_handler.dart';
 const String apiBaseUrl = "http://63.187.131.29:8000";
 const String gattServiceUuid = "19b10000-e8f2-537e-4f6c-d104768a1214";
 const String gattBuzzerCharUuid = "19b10001-e8f2-537e-4f6c-d104768a1214";
+const String gattBatteryServiceUuid = "0000180f-0000-1000-8000-00805f9b34fb";
+const String gattBatteryCharUuid = "00002a19-0000-1000-8000-00805f9b34fb";
+const String gattCustomBatteryCharUuid = "19b10002-e8f2-537e-4f6c-d104768a1214";
 
 /// Normalizuje adres MAC w dowolnym formacie (AABBCCDDEEFF, aa:bb:..., aa-bb-..., JSON)
 /// do kanonicznego formatu AA:BB:CC:DD:EE:FF. Zwraca null, jeśli format jest błędny.
@@ -392,6 +395,17 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (_) {}
   }
 
+  Future<void> _updateBattery(String mac, int battery) async {
+    try {
+      await http.patch(
+        Uri.parse("$apiBaseUrl/api/packages/$mac/battery"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"battery_level": battery}),
+      );
+      await _fetchPackages();
+    } catch (_) {}
+  }
+
   void _openRadarSheet(Map<String, dynamic> pkg) {
     final mac = pkg["mac_address"]?.toString();
     if (mac == null || mac.isEmpty) {
@@ -403,7 +417,8 @@ class _HomeScreenState extends State<HomeScreen> {
       isScrollControlled: true,
       builder: (_) => BleRadarSheet(
         pkg: pkg,
-        onFound: () async => _updateStatus(mac, "FOUND", battery: 95),
+        onFound: (int? battery) async => _updateStatus(mac, "FOUND", battery: battery),
+        onBatteryRead: (int battery) async => _updateBattery(mac, battery),
         onDeliver: () async => _markAsDelivered(pkg["id"]),
       ),
     ).then((_) => _fetchPackages());
@@ -516,7 +531,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             subtitle: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text("Gabaryt: $size  |  MAC: ${mac ?? 'zwolniony'}"),
+                                Text("Gabaryt: $size  |  MAC: ${mac ?? 'zwolniony'}  |  Bat: ${p['battery_level'] ?? '-'}%"),
                                 Text("InPost PUDO: $pudoLabel  ($status)",
                                     style: TextStyle(
                                         color: isDelivered ? Colors.grey : Colors.deepOrange,
@@ -548,13 +563,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class BleRadarSheet extends StatefulWidget {
   final Map<String, dynamic> pkg;
-  final Future<void> Function() onFound;
+  final Future<void> Function(int? battery) onFound;
+  final Future<void> Function(int battery) onBatteryRead;
   final Future<void> Function() onDeliver;
 
   const BleRadarSheet({
     super.key,
     required this.pkg,
     required this.onFound,
+    required this.onBatteryRead,
     required this.onDeliver,
   });
 
@@ -567,7 +584,11 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   static const int _windowSize = 10;
   double _threshold = -60.0;
   double? _filteredRssi;
-  bool _triggered = false;
+  bool _alarmActive = false;
+  bool _markedFound = false;
+  bool _bleBusy = false;
+  int? _batteryLevel;
+  BluetoothDevice? _foundDevice;
   StreamSubscription<List<ScanResult>>? _scanSub;
 
   String get _targetMac {
@@ -578,6 +599,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   @override
   void initState() {
     super.initState();
+    _batteryLevel = widget.pkg["battery_level"] is int ? widget.pkg["battery_level"] : null;
     _startBleScan();
   }
 
@@ -586,6 +608,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
         if (r.device.remoteId.str.toUpperCase() == _targetMac) {
+          _foundDevice = r.device;
           _addRssiSample(r.rssi, r.device);
         }
       }
@@ -611,28 +634,82 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
 
     if (mounted) setState(() => _filteredRssi = avg);
 
-    if (!_triggered && avg >= _threshold) {
-      _triggered = true;
-      _triggerGattBuzzer(device);
-      widget.onFound();
+    if (!_alarmActive && !_markedFound && !_bleBusy && avg >= _threshold) {
+      _activateLocatorAlarm(device);
     }
   }
 
-  Future<void> _triggerGattBuzzer(BluetoothDevice device) async {
+  Future<void> _activateLocatorAlarm(BluetoothDevice device) async {
+    if (mounted) setState(() => _bleBusy = true);
+    final battery = await _sendGattCommand(device, 0x01, readBattery: true);
+    if (mounted) {
+      setState(() {
+        _alarmActive = true;
+        _bleBusy = false;
+        if (battery != null) _batteryLevel = battery;
+      });
+    }
+    if (battery != null) {
+      await widget.onBatteryRead(battery);
+    }
+  }
+
+  Future<void> _stopAlarmAndMarkFound() async {
+    if (_bleBusy) return;
+    if (mounted) setState(() => _bleBusy = true);
+
+    int? battery = _batteryLevel;
+    if (_foundDevice != null) {
+      final readBat = await _sendGattCommand(_foundDevice!, 0x00, readBattery: true);
+      if (readBat != null) battery = readBat;
+    }
+
+    await widget.onFound(battery);
+    if (mounted) {
+      setState(() {
+        _alarmActive = false;
+        _markedFound = true;
+        _bleBusy = false;
+        if (battery != null) _batteryLevel = battery;
+      });
+    }
+  }
+
+  /// Wysyła komendę do lokalizatora (0x01 = ON, 0x00 = OFF) i opcjonalnie odczytuje baterię (0-100%).
+  Future<int?> _sendGattCommand(
+    BluetoothDevice device,
+    int commandByte, {
+    bool readBattery = false,
+  }) async {
+    int? battery;
     try {
       await device.connect(license: License.free, timeout: const Duration(seconds: 5));
       final services = await device.discoverServices();
       for (final s in services) {
-        if (s.uuid.toString().toLowerCase() == gattServiceUuid) {
+        final sUuid = s.uuid.toString().toLowerCase();
+        if (sUuid == gattServiceUuid) {
           for (final c in s.characteristics) {
-            if (c.uuid.toString().toLowerCase() == gattBuzzerCharUuid) {
-              await c.write([0x01]);
+            final cUuid = c.uuid.toString().toLowerCase();
+            if (cUuid == gattBuzzerCharUuid) {
+              await c.write([commandByte]);
+            } else if (readBattery && cUuid == gattCustomBatteryCharUuid) {
+              final val = await c.read();
+              if (val.isNotEmpty) battery = val.first.clamp(0, 100);
+            }
+          }
+        } else if (readBattery && (sUuid == gattBatteryServiceUuid || sUuid == "180f")) {
+          for (final c in s.characteristics) {
+            final cUuid = c.uuid.toString().toLowerCase();
+            if (cUuid == gattBatteryCharUuid || cUuid == "2a19") {
+              final val = await c.read();
+              if (val.isNotEmpty) battery = val.first.clamp(0, 100);
             }
           }
         }
       }
       await device.disconnect();
     } catch (_) {}
+    return battery;
   }
 
   @override
@@ -656,22 +733,36 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
           ),
           const SizedBox(height: 6),
           Text("Kod: ${widget.pkg['package_code']}"),
-          Text("Gabaryt: ${widget.pkg['parcel_size'] ?? '-'}  |  MAC: $_targetMac",
-              style: const TextStyle(color: Colors.black54)),
+          Text(
+            "Gabaryt: ${widget.pkg['parcel_size'] ?? '-'}  |  MAC: $_targetMac  |  Bateria: ${_batteryLevel != null ? '$_batteryLevel%' : '-'}",
+            style: const TextStyle(color: Colors.black54, fontSize: 12),
+          ),
           const SizedBox(height: 16),
           Text(
             _filteredRssi == null ? "Skanowanie BLE..." : "${_filteredRssi!.toStringAsFixed(1)} dBm",
             style: TextStyle(
               fontSize: 34,
               fontWeight: FontWeight.bold,
-              color: _triggered ? Colors.green : Colors.deepOrange,
+              color: _markedFound
+                  ? Colors.green
+                  : (_alarmActive ? Colors.amber.shade800 : Colors.deepOrange),
             ),
           ),
-          if (_triggered)
+          if (_alarmActive)
             const Padding(
               padding: EdgeInsets.only(top: 6),
-              child: Text("ZNALEZIONO! Sygnał wysłany do lokalizatora.",
-                  style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+              child: Text(
+                "ALARM AKTYWNY! Lokalizator miga i bzyka (0x01).",
+                style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold),
+              ),
+            ),
+          if (_markedFound)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                "ZNALEZIONO! Lokalizator wyłączony (0x00), status: FOUND.",
+                style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
+              ),
             ),
           const SizedBox(height: 10),
           Row(
@@ -691,6 +782,30 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
             ],
           ),
           const SizedBox(height: 12),
+          if (!_markedFound)
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: _alarmActive ? Colors.orange.shade800 : Colors.blueGrey,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                icon: _bleBusy
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.notifications_off_outlined),
+                label: Text(
+                  _alarmActive
+                      ? "Wyłącz lokalizator i oznacz jako ZNALEZIONO"
+                      : "Oznacz jako ZNALEZIONO (ręcznie / wyłącz)",
+                ),
+                onPressed: _bleBusy ? null : _stopAlarmAndMarkFound,
+              ),
+            ),
+          const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
@@ -705,6 +820,9 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
                     : "Potwierdź wydanie KLIENTOWI (InPost + Odoo)",
               ),
               onPressed: () async {
+                if (_alarmActive && _foundDevice != null) {
+                  await _sendGattCommand(_foundDevice!, 0x00);
+                }
                 await widget.onDeliver();
                 if (context.mounted) Navigator.pop(context);
               },
