@@ -61,11 +61,18 @@ class SmartLocatorApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'PUDO Smart Lokalizator',
+      title: 'PUDO Lokalizator',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorSchemeSeed: Colors.amber,
+        colorSchemeSeed: const Color(0xFF1F2937),
+        scaffoldBackgroundColor: const Color(0xFFF8FAFC),
         useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Color(0xFF111827),
+          elevation: 0,
+          scrolledUnderElevation: 0,
+        ),
       ),
       home: const HomeScreen(),
     );
@@ -98,7 +105,10 @@ class _QrScannerPageState extends State<QrScannerPage> {
         content: TextField(
           controller: ctrl,
           autofocus: true,
-          decoration: const InputDecoration(hintText: "Numer przesyłki lub kod QR"),
+          decoration: const InputDecoration(
+            hintText: "Numer przesyłki lub kod QR",
+            border: OutlineInputBorder(),
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Anuluj")),
@@ -194,6 +204,7 @@ class _HomeScreenState extends State<HomeScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg),
+        behavior: SnackBarBehavior.floating,
         backgroundColor: isError ? Colors.red.shade700 : Colors.green.shade700,
         duration: const Duration(seconds: 4),
       ),
@@ -215,9 +226,10 @@ class _HomeScreenState extends State<HomeScreen> {
     await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(isOutbound
-            ? "Przyjmij NADANIE od klienta"
-            : "Przyjmij paczkę OD KURIERA"),
+        title: Text(
+          isOutbound ? "Przyjmij NADANIE od klienta" : "Przyjmij paczkę OD KURIERA",
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -225,6 +237,7 @@ class _HomeScreenState extends State<HomeScreen> {
               controller: codeCtrl,
               decoration: InputDecoration(
                 labelText: "Kod paczki / ID InPost",
+                border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.qr_code_scanner),
                   tooltip: "Skanuj etykietę paczki",
@@ -245,6 +258,7 @@ class _HomeScreenState extends State<HomeScreen> {
               decoration: InputDecoration(
                 labelText: "Adres MAC lokalizatora XIAO",
                 hintText: "AABBCCDDEEFF lub AA:BB:CC:DD:EE:FF",
+                border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.qr_code_scanner),
                   tooltip: "Skanuj QR lokalizatora",
@@ -259,8 +273,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         macCtrl.text = normalized;
                       } else {
                         macCtrl.text = scanned;
-                        _showSnack("Zeskanowany QR nie zawiera poprawnego 12-znakowego MAC",
-                            isError: true);
+                        _showSnack(
+                          "Zeskanowany QR nie zawiera poprawnego 12-znakowego MAC",
+                          isError: true,
+                        );
                       }
                     }
                   },
@@ -314,7 +330,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final data = jsonDecode(resp.body);
         await _fetchPackages();
         final label = isOutbound ? "Nadana w punkcie" : "Przyjęta do odbioru";
-        _showSnack("$label: ${data['package_code']} (MAC: ${data['mac_address']})");
+        _showSnack("$label: ${data['package_code']}");
       } else {
         final err = jsonDecode(resp.body)["detail"] ?? resp.body;
         _showSnack("Błąd: $err", isError: true);
@@ -415,6 +431,10 @@ class _HomeScreenState extends State<HomeScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (_) => BleRadarSheet(
         pkg: pkg,
         onFound: (int? battery) async => _updateStatus(mac, "FOUND", battery: battery),
@@ -424,135 +444,196 @@ class _HomeScreenState extends State<HomeScreen> {
     ).then((_) => _fetchPackages());
   }
 
-  String _formatPudoStatus(String? s) {
-    switch (s) {
-      case "dispatched_by_sender":
-        return "Nadana w punkcie";
-      case "ready_to_pickup":
-        return "Do odbioru";
-      case "collected_from_sender":
-        return "Odebrana przez kuriera";
-      case "delivered":
-        return "Wydana klientowi";
-      default:
-        return "Do nadania";
-    }
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onPressed,
+  }) {
+    return Expanded(
+      child: FilledButton.icon(
+        style: FilledButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        icon: Icon(icon, size: 20),
+        label: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+        onPressed: onPressed,
+      ),
+    );
+  }
+
+  IconData _batteryIcon(int? level) {
+    if (level == null) return Icons.battery_unknown;
+    if (level >= 80) return Icons.battery_full;
+    if (level >= 50) return Icons.battery_5_bar;
+    if (level >= 25) return Icons.battery_3_bar;
+    return Icons.battery_alert;
+  }
+
+  Color _batteryColor(int? level) {
+    if (level == null) return Colors.grey;
+    if (level >= 50) return Colors.green.shade700;
+    if (level >= 20) return Colors.orange.shade700;
+    return Colors.red.shade700;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("PUDO Lokalizator (InPost + BLE)"),
+        title: const Text(
+          "PUDO Lokalizator",
+          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 19),
+        ),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchPackages),
         ],
       ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.all(10),
+          Container(
+            color: Colors.white,
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Column(
               children: [
                 Row(
                   children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(backgroundColor: Colors.indigo),
-                        icon: const Icon(Icons.archive_outlined),
-                        label: const Text("Nadanie\n(od klienta)", textAlign: TextAlign.center),
-                        onPressed: () => _showAcceptDialog(isOutbound: true),
-                      ),
+                    _buildActionButton(
+                      icon: Icons.archive_outlined,
+                      label: "Nadanie\n(od klienta)",
+                      color: const Color(0xFF334155),
+                      onPressed: () => _showAcceptDialog(isOutbound: true),
                     ),
                     const SizedBox(width: 8),
-                    Expanded(
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(backgroundColor: Colors.blueGrey),
-                        icon: const Icon(Icons.local_shipping_outlined),
-                        label: const Text("Wydaj kurierowi\n(QR)", textAlign: TextAlign.center),
-                        onPressed: _courierPickupFlow,
-                      ),
+                    _buildActionButton(
+                      icon: Icons.local_shipping_outlined,
+                      label: "Wydaj kurierowi\n(QR)",
+                      color: const Color(0xFF475569),
+                      onPressed: _courierPickupFlow,
                     ),
                   ],
                 ),
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(backgroundColor: Colors.teal),
-                        icon: const Icon(Icons.move_to_inbox),
-                        label: const Text("Przyjmij\nod kuriera", textAlign: TextAlign.center),
-                        onPressed: () => _showAcceptDialog(isOutbound: false),
-                      ),
+                    _buildActionButton(
+                      icon: Icons.move_to_inbox,
+                      label: "Przyjmij\nod kuriera",
+                      color: const Color(0xFF0F766E),
+                      onPressed: () => _showAcceptDialog(isOutbound: false),
                     ),
                     const SizedBox(width: 8),
-                    Expanded(
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(backgroundColor: Colors.amber.shade800),
-                        icon: const Icon(Icons.qr_code_scanner),
-                        label: const Text("Wydaj klientowi\n(QR)", textAlign: TextAlign.center),
-                        onPressed: _clientPickupFlow,
-                      ),
+                    _buildActionButton(
+                      icon: Icons.qr_code_scanner,
+                      label: "Wydaj klientowi\n(QR)",
+                      color: const Color(0xFFD97706),
+                      onPressed: _clientPickupFlow,
                     ),
                   ],
                 ),
               ],
             ),
           ),
-          const Divider(height: 1),
+          const Divider(height: 1, color: Color(0xFFE2E8F0)),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : RefreshIndicator(
                     onRefresh: _fetchPackages,
-                    child: ListView.builder(
-                      itemCount: _packages.length,
-                      itemBuilder: (_, i) {
-                        final p = _packages[i];
-                        final isOutbound = p["direction"] == "OUTBOUND";
-                        final status = p["status"] ?? "IDLE";
-                        final isDelivered = status == "DELIVERED";
-                        final mac = p["mac_address"];
-                        final size = p["parcel_size"] ?? "-";
-                        final pudoLabel = _formatPudoStatus(p["inpost_pudo_status"]);
+                    child: _packages.isEmpty
+                        ? ListView(
+                            children: const [
+                              SizedBox(height: 80),
+                              Center(
+                                child: Text(
+                                  "Brak paczek",
+                                  style: TextStyle(color: Colors.grey, fontSize: 15),
+                                ),
+                              ),
+                            ],
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.all(12),
+                            itemCount: _packages.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 8),
+                            itemBuilder: (_, i) {
+                              final p = _packages[i];
+                              final status = p["status"] ?? "IDLE";
+                              final isDelivered = status == "DELIVERED";
+                              final mac = p["mac_address"]?.toString();
+                              final int? battery = p["battery_level"] is num
+                                  ? (p["battery_level"] as num).toInt()
+                                  : null;
 
-                        return Card(
-                          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                          child: ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: isOutbound ? Colors.indigo : Colors.teal,
-                              foregroundColor: Colors.white,
-                              child: Text(isOutbound ? "NAD" : "ODB",
-                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                            ),
-                            title: Text("${p['package_code']}",
-                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text("Gabaryt: $size  |  MAC: ${mac ?? 'zwolniony'}  |  Bat: ${p['battery_level'] ?? '-'}%"),
-                                Text("InPost PUDO: $pudoLabel  ($status)",
+                              return Material(
+                                color: Colors.white,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  side: const BorderSide(color: Color(0xFFE2E8F0)),
+                                ),
+                                child: ListTile(
+                                  contentPadding:
+                                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                  title: Text(
+                                    "${p['package_code']}",
                                     style: TextStyle(
-                                        color: isDelivered ? Colors.grey : Colors.deepOrange,
-                                        fontWeight: FontWeight.bold)),
-                              ],
-                            ),
-                            trailing: isDelivered
-                                ? const Icon(Icons.check_circle, color: Colors.grey)
-                                : IconButton(
-                                    icon: const Icon(Icons.radar, color: Colors.deepOrange),
-                                    onPressed: () async {
-                                      if (mac != null) {
-                                        await http.post(Uri.parse("$apiBaseUrl/api/locate/$mac"));
-                                        _openRadarSheet(p);
-                                      }
-                                    },
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14,
+                                      color: isDelivered ? Colors.grey : const Color(0xFF111827),
+                                    ),
                                   ),
+                                  subtitle: Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          _batteryIcon(battery),
+                                          size: 16,
+                                          color: _batteryColor(battery),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          battery != null ? "$battery%" : "-",
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w500,
+                                            color: _batteryColor(battery),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  trailing: isDelivered
+                                      ? const Icon(Icons.check_circle, color: Colors.grey)
+                                      : IconButton(
+                                          icon: const Icon(Icons.radar, color: Color(0xFFD97706)),
+                                          onPressed: () async {
+                                            if (mac != null && mac.isNotEmpty) {
+                                              await http.post(
+                                                  Uri.parse("$apiBaseUrl/api/locate/$mac"));
+                                              _openRadarSheet(p);
+                                            }
+                                          },
+                                        ),
+                                  onTap: (!isDelivered && mac != null && mac.isNotEmpty)
+                                      ? () async {
+                                          await http
+                                              .post(Uri.parse("$apiBaseUrl/api/locate/$mac"));
+                                          _openRadarSheet(p);
+                                        }
+                                      : null,
+                                ),
+                              );
+                            },
                           ),
-                        );
-                      },
-                    ),
                   ),
           ),
         ],
@@ -581,15 +662,17 @@ class BleRadarSheet extends StatefulWidget {
 
 class _BleRadarSheetState extends State<BleRadarSheet> {
   final List<int> _rssiWindow = [];
-  static const int _windowSize = 10;
+  static const int _windowSize = 5;
   double _threshold = -60.0;
   double? _filteredRssi;
   bool _alarmActive = false;
   bool _markedFound = false;
   bool _bleBusy = false;
+  bool _disposed = false;
   int? _batteryLevel;
   BluetoothDevice? _foundDevice;
   StreamSubscription<List<ScanResult>>? _scanSub;
+  Timer? _scanWatchdog;
 
   String get _targetMac {
     final raw = (widget.pkg["mac_address"] ?? "").toString();
@@ -599,13 +682,14 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   @override
   void initState() {
     super.initState();
-    _batteryLevel = widget.pkg["battery_level"] is int ? widget.pkg["battery_level"] : null;
-    _startBleScan();
+    _batteryLevel = widget.pkg["battery_level"] is num
+        ? (widget.pkg["battery_level"] as num).toInt()
+        : null;
+    _initBleRadar();
   }
 
-  Future<void> _startBleScan() async {
-    await FlutterBluePlus.stopScan();
-    _scanSub = FlutterBluePlus.scanResults.listen((results) {
+  Future<void> _initBleRadar() async {
+    _scanSub = FlutterBluePlus.onScanResults.listen((results) {
       for (final r in results) {
         if (r.device.remoteId.str.toUpperCase() == _targetMac) {
           _foundDevice = r.device;
@@ -613,13 +697,34 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
         }
       }
     });
-    await FlutterBluePlus.startScan(
-      timeout: const Duration(minutes: 3),
-      androidScanMode: AndroidScanMode.lowLatency,
-    );
+
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+    await _startBleScan();
+
+    _scanWatchdog = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!_disposed && !_bleBusy && !FlutterBluePlus.isScanningNow) {
+        _startBleScan();
+      }
+    });
+  }
+
+  Future<void> _startBleScan() async {
+    if (_disposed) return;
+    try {
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(minutes: 5),
+        continuousUpdates: true,
+        continuousDivisor: 1,
+        androidScanMode: AndroidScanMode.lowLatency,
+      );
+    } catch (_) {}
   }
 
   void _addRssiSample(int rssi, BluetoothDevice device) {
+    if (rssi == 127) return;
+
     _rssiWindow.add(rssi);
     if (_rssiWindow.length > _windowSize) _rssiWindow.removeAt(0);
 
@@ -675,7 +780,8 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
     }
   }
 
-  /// Wysyła komendę do lokalizatora (0x01 = ON, 0x00 = OFF) i opcjonalnie odczytuje baterię (0-100%).
+  /// Wysyła komendę do lokalizatora (0x01 = ON, 0x00 = OFF), opcjonalnie czyta baterię
+  /// i wznawia ciągłe skanowanie RSSI po rozłączeniu.
   Future<int?> _sendGattCommand(
     BluetoothDevice device,
     int commandByte, {
@@ -683,6 +789,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   }) async {
     int? battery;
     try {
+      await FlutterBluePlus.stopScan();
       await device.connect(license: License.free, timeout: const Duration(seconds: 5));
       final services = await device.discoverServices();
       for (final s in services) {
@@ -707,13 +814,22 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
           }
         }
       }
-      await device.disconnect();
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      try {
+        await device.disconnect();
+      } catch (_) {}
+      if (!_disposed && mounted) {
+        await _startBleScan();
+      }
+    }
     return battery;
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _scanWatchdog?.cancel();
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
     super.dispose();
@@ -722,20 +838,31 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   @override
   Widget build(BuildContext context) {
     final isOutbound = widget.pkg["direction"] == "OUTBOUND";
+    final double signalProgress =
+        _filteredRssi == null ? 0.0 : ((_filteredRssi! + 100.0) / 60.0).clamp(0.0, 1.0);
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            isOutbound ? "Szukanie NADANIA dla kuriera" : "Szukanie paczki DLA KLIENTA",
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          Container(
+            width: 36,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 14),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade300,
+              borderRadius: BorderRadius.circular(2),
+            ),
           ),
-          const SizedBox(height: 6),
-          Text("Kod: ${widget.pkg['package_code']}"),
           Text(
-            "Gabaryt: ${widget.pkg['parcel_size'] ?? '-'}  |  MAC: $_targetMac  |  Bateria: ${_batteryLevel != null ? '$_batteryLevel%' : '-'}",
-            style: const TextStyle(color: Colors.black54, fontSize: 12),
+            "${widget.pkg['package_code']}",
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            "Bateria: ${_batteryLevel != null ? '$_batteryLevel%' : '-'}",
+            style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
           ),
           const SizedBox(height: 16),
           Text(
@@ -744,30 +871,42 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
               fontSize: 34,
               fontWeight: FontWeight.bold,
               color: _markedFound
-                  ? Colors.green
-                  : (_alarmActive ? Colors.amber.shade800 : Colors.deepOrange),
+                  ? Colors.green.shade700
+                  : (_alarmActive ? Colors.amber.shade800 : const Color(0xFF1F2937)),
+            ),
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: _filteredRssi == null ? null : signalProgress,
+              minHeight: 8,
+              backgroundColor: Colors.grey.shade200,
+              color: _markedFound
+                  ? Colors.green.shade700
+                  : (_alarmActive ? Colors.amber.shade700 : Colors.blueGrey),
             ),
           ),
           if (_alarmActive)
             const Padding(
-              padding: EdgeInsets.only(top: 6),
+              padding: EdgeInsets.only(top: 8),
               child: Text(
-                "ALARM AKTYWNY! Lokalizator miga i bzyka (0x01).",
-                style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.bold),
+                "Alarm aktywny (0x01)",
+                style: TextStyle(color: Colors.deepOrange, fontWeight: FontWeight.w600),
               ),
             ),
           if (_markedFound)
             const Padding(
-              padding: EdgeInsets.only(top: 6),
+              padding: EdgeInsets.only(top: 8),
               child: Text(
-                "ZNALEZIONO! Lokalizator wyłączony (0x00), status: FOUND.",
-                style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
+                "Znaleziono — alarm wyłączony (FOUND)",
+                style: TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
               ),
             ),
           const SizedBox(height: 10),
           Row(
             children: [
-              const Text("Próg dBm:"),
+              const Text("Próg:"),
               Expanded(
                 child: Slider(
                   min: -90,
@@ -778,10 +917,10 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
                   onChanged: (v) => setState(() => _threshold = v),
                 ),
               ),
-              Text("${_threshold.round()}"),
+              Text("${_threshold.round()} dBm"),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           if (!_markedFound)
             SizedBox(
               width: double.infinity,
@@ -789,6 +928,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
                 style: FilledButton.styleFrom(
                   backgroundColor: _alarmActive ? Colors.orange.shade800 : Colors.blueGrey,
                   padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 icon: _bleBusy
                     ? const SizedBox(
@@ -800,24 +940,23 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
                 label: Text(
                   _alarmActive
                       ? "Wyłącz lokalizator i oznacz jako ZNALEZIONO"
-                      : "Oznacz jako ZNALEZIONO (ręcznie / wyłącz)",
+                      : "Oznacz jako ZNALEZIONO",
                 ),
                 onPressed: _bleBusy ? null : _stopAlarmAndMarkFound,
               ),
             ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
               style: FilledButton.styleFrom(
                 backgroundColor: Colors.green.shade700,
                 padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
               icon: const Icon(Icons.check_circle_outline),
               label: Text(
-                isOutbound
-                    ? "Potwierdź wydanie KURIEROWI (Odoo)"
-                    : "Potwierdź wydanie KLIENTOWI (InPost + Odoo)",
+                isOutbound ? "Potwierdź wydanie KURIEROWI" : "Potwierdź wydanie KLIENTOWI",
               ),
               onPressed: () async {
                 if (_alarmActive && _foundDevice != null) {
