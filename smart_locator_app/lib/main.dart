@@ -660,11 +660,22 @@ class BleRadarSheet extends StatefulWidget {
   State<BleRadarSheet> createState() => _BleRadarSheetState();
 }
 
+class _RssiSample {
+  final DateTime timestamp;
+  final int rssi;
+  const _RssiSample(this.timestamp, this.rssi);
+}
+
 class _BleRadarSheetState extends State<BleRadarSheet> {
-  final List<int> _rssiWindow = [];
-  static const int _windowSize = 5;
+  final List<_RssiSample> _rssiBuffer = [];
+  static const int _maxBufferSamples = 25;
+  static const int _windowMs = 2000;
+  static const int _minSamplesForTrigger = 5;
+  static const Duration _uiRefreshInterval = Duration(milliseconds: 500);
+
   double _threshold = -60.0;
   double? _filteredRssi;
+  int _averagedCount = 0;
   bool _alarmActive = false;
   bool _markedFound = false;
   bool _bleBusy = false;
@@ -672,6 +683,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   int? _batteryLevel;
   BluetoothDevice? _foundDevice;
   StreamSubscription<List<ScanResult>>? _scanSub;
+  Timer? _uiTimer;
   Timer? _scanWatchdog;
 
   String get _targetMac {
@@ -690,10 +702,11 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
 
   Future<void> _initBleRadar() async {
     _scanSub = FlutterBluePlus.onScanResults.listen((results) {
+      final now = DateTime.now();
       for (final r in results) {
         if (r.device.remoteId.str.toUpperCase() == _targetMac) {
           _foundDevice = r.device;
-          _addRssiSample(r.rssi, r.device);
+          _collectRssiSample(r.rssi, now);
         }
       }
     });
@@ -702,6 +715,8 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
     await _startBleScan();
+
+    _uiTimer = Timer.periodic(_uiRefreshInterval, (_) => _processRssiTick());
 
     _scanWatchdog = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!_disposed && !_bleBusy && !FlutterBluePlus.isScanningNow) {
@@ -722,25 +737,55 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
     } catch (_) {}
   }
 
-  void _addRssiSample(int rssi, BluetoothDevice device) {
-    if (rssi == 127) return;
+  void _collectRssiSample(int rssi, DateTime now) {
+    if (rssi == 127 || rssi > 0 || rssi < -120) return;
+    _rssiBuffer.add(_RssiSample(now, rssi));
+    if (_rssiBuffer.length > _maxBufferSamples) {
+      _rssiBuffer.removeAt(0);
+    }
+  }
 
-    _rssiWindow.add(rssi);
-    if (_rssiWindow.length > _windowSize) _rssiWindow.removeAt(0);
+  void _processRssiTick() {
+    if (_disposed || !mounted) return;
 
-    double avg;
-    if (_rssiWindow.length >= 4) {
-      final sorted = List<int>.from(_rssiWindow)..sort();
-      final trimmed = sorted.sublist(1, sorted.length - 1);
-      avg = trimmed.reduce((a, b) => a + b) / trimmed.length;
-    } else {
-      avg = _rssiWindow.reduce((a, b) => a + b) / _rssiWindow.length;
+    final now = DateTime.now();
+    _rssiBuffer.removeWhere(
+      (s) => now.difference(s.timestamp).inMilliseconds > _windowMs,
+    );
+
+    if (_rssiBuffer.isEmpty) {
+      if (_averagedCount != 0) {
+        setState(() => _averagedCount = 0);
+      }
+      return;
     }
 
-    if (mounted) setState(() => _filteredRssi = avg);
+    final sorted = _rssiBuffer.map((s) => s.rssi).toList()..sort();
+    List<int> core;
+    if (sorted.length >= 5) {
+      final trim = (sorted.length * 0.2).floor().clamp(1, (sorted.length - 1) ~/ 2);
+      core = sorted.sublist(trim, sorted.length - trim);
+    } else if (sorted.length >= 3) {
+      core = sorted.sublist(1, sorted.length - 1);
+    } else {
+      core = sorted;
+    }
 
-    if (!_alarmActive && !_markedFound && !_bleBusy && avg >= _threshold) {
-      _activateLocatorAlarm(device);
+    final avg = core.reduce((a, b) => a + b) / core.length;
+    final sampleCount = _rssiBuffer.length;
+
+    setState(() {
+      _filteredRssi = avg;
+      _averagedCount = sampleCount;
+    });
+
+    if (!_alarmActive &&
+        !_markedFound &&
+        !_bleBusy &&
+        _foundDevice != null &&
+        sampleCount >= _minSamplesForTrigger &&
+        avg >= _threshold) {
+      _activateLocatorAlarm(_foundDevice!);
     }
   }
 
@@ -819,6 +864,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
       try {
         await device.disconnect();
       } catch (_) {}
+      _rssiBuffer.clear();
       if (!_disposed && mounted) {
         await _startBleScan();
       }
@@ -829,6 +875,7 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
   @override
   void dispose() {
     _disposed = true;
+    _uiTimer?.cancel();
     _scanWatchdog?.cancel();
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
@@ -875,6 +922,14 @@ class _BleRadarSheetState extends State<BleRadarSheet> {
                   : (_alarmActive ? Colors.amber.shade800 : const Color(0xFF1F2937)),
             ),
           ),
+          if (_averagedCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                "Średnia z $_averagedCount ramek (odświeżanie 0,5 s)",
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+              ),
+            ),
           const SizedBox(height: 10),
           ClipRRect(
             borderRadius: BorderRadius.circular(6),
